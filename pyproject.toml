@@ -67,8 +67,13 @@ Repository = "https://github.com/northbound-run/hermes-chat-recorder"
 # Hermes plugin discovery — `pip install hermes-chat-recorder` into a
 # Hermes venv makes the plugin auto-loadable via the `hermes_agent.plugins`
 # entry-point group declared at hermes_cli/plugins.py:ENTRY_POINTS_GROUP.
+#
+# The value MUST be the module path only (no `:register` suffix). Hermes's
+# _load_entrypoint_module calls ep.load() then does getattr(module, "register").
+# If we point at the function directly, ep.load() returns the function and
+# getattr(function, "register") is None — "no register() function" warning.
 [project.entry-points."hermes_agent.plugins"]
-chat_recorder = "hermes_chat_recorder:register"
+chat_recorder = "hermes_chat_recorder"
 
 [tool.setuptools.packages.find]
 where = ["src"]

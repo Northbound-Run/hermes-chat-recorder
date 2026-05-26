@@ -135,15 +135,32 @@ def _kick_prewarm(recorder: Recorder) -> None:
 
 
 def _read_plugin_block(ctx: Any) -> dict | None:
-    """Best-effort extraction of the ``plugins.chat_recorder`` block.
+    """Extract the ``plugins.chat_recorder`` block from Hermes's config.
 
-    Tries (in order): ``ctx.config["plugins"]["chat_recorder"]``,
-    ``ctx.config.get("plugins", {}).get("chat_recorder")``, then a
-    bare ``ctx.config["chat_recorder"]`` fallback.
+    PluginContext doesn't expose the loaded config directly. Hermes's
+    convention (see ``plugins/memory/holographic/__init__.py``) is for
+    plugins to import ``hermes_cli.config.load_config`` and read via
+    ``cfg_get``. We mirror that. The ``ctx.config`` lookup path is kept
+    as a fallback for any future test ctx that provides config that way.
     """
+    # Hermes's canonical path.
+    try:
+        from hermes_cli.config import load_config as _load_hermes_config  # type: ignore[import-not-found]
+        from hermes_cli.config import cfg_get  # type: ignore[import-not-found]
+
+        all_config = _load_hermes_config()
+        block = cfg_get(all_config, "plugins", "chat_recorder", default=None)
+        if isinstance(block, dict):
+            return block
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "hermes_chat_recorder: hermes_cli.config unavailable (%s); "
+            "falling back to ctx.config lookup.",
+            exc,
+        )
+
+    # Fallback path — useful for tests that build a fake ctx with .config.
     cfg = getattr(ctx, "config", None)
-    if cfg is None:
-        return None
     if isinstance(cfg, dict):
         plugins = cfg.get("plugins")
         if isinstance(plugins, dict):
