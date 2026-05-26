@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-chat-recorder"
+version = "0.0.1"
+description = "Record every Hermes Matrix chat message (text, voice, image) to an Obsidian-style vault, with wake gating by @-mention or nickname."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Northbound", email = "matthew@hall.vc" },
+]
+keywords = [
+    "hermes",
+    "hermes-agent",
+    "matrix",
+    "obsidian",
+    "transcript",
+    "voice-transcription",
+    "image-description",
+    "chatbot",
+    "ai-agent",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Office/Business",
+]
+
+dependencies = [
+    # Voice transcription. Pin a minor that we've validated against
+    # nousresearch/hermes-agent:latest's bundled CTranslate2.
+    "faster-whisper>=1.2.0,<2.0",
+    # HTTP for OpenRouter vision describer. Use `httpx` (sync API) to
+    # keep the plugin import-time lean — Hermes already ships httpx so
+    # this is a no-op runtime dep on the bundled image.
+    "httpx>=0.27,<1.0",
+    # YAML config loader. Hermes ships PyYAML in its venv; declare it
+    # so standalone (pip-into-fresh-venv) installs still work.
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-PyYAML",
+]
+
+[project.urls]
+Homepage = "https://github.com/northbound-run/hermes-chat-recorder"
+Issues = "https://github.com/northbound-run/hermes-chat-recorder/issues"
+Repository = "https://github.com/northbound-run/hermes-chat-recorder"
+
+# Hermes plugin discovery — `pip install hermes-chat-recorder` into a
+# Hermes venv makes the plugin auto-loadable via the `hermes_agent.plugins`
+# entry-point group declared at hermes_cli/plugins.py:ENTRY_POINTS_GROUP.
+[project.entry-points."hermes_agent.plugins"]
+chat_recorder = "hermes_chat_recorder:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hermes_chat_recorder = ["plugin.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
