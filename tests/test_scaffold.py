@@ -1,14 +1,10 @@
 """Smoke tests covering the scaffolded package shape.
 
-These exist so the test suite has something green to run before P2 lands.
-They verify the package is importable, the public surface (``register``,
-``__version__``) exists, and the stub fails with a useful message instead
-of a confusing AttributeError.
+After P3 these verify the package surface is sound — the deep behaviour
+checks live in the module-specific test files.
 """
 
 from __future__ import annotations
-
-import pytest
 
 
 def test_package_imports() -> None:
@@ -25,12 +21,30 @@ def test_version_present_and_string() -> None:
     assert hermes_chat_recorder.__version__.count(".") == 2
 
 
-def test_register_is_not_yet_implemented() -> None:
-    """The scaffold ships a stub. Real wiring lands in P2."""
+def test_register_callable_with_minimal_ctx(tmp_path) -> None:
+    """register() should accept a duck-typed ctx and return a Recorder."""
+    from types import SimpleNamespace
+
     import hermes_chat_recorder
 
-    class _DummyCtx:
-        pass
+    hooks_bound: list[tuple[str, object]] = []
 
-    with pytest.raises(NotImplementedError):
-        hermes_chat_recorder.register(_DummyCtx())
+    ctx = SimpleNamespace(
+        config={
+            "plugins": {
+                "chat_recorder": {
+                    "enabled": True,
+                    "vault_root": str(tmp_path),
+                    "nicknames": ["ralph"],
+                }
+            }
+        },
+        register_hook=lambda name, cb: hooks_bound.append((name, cb)),
+    )
+
+    result = hermes_chat_recorder.register(ctx)
+    assert result is not None
+    assert {name for name, _ in hooks_bound} == {
+        "pre_gateway_dispatch",
+        "on_session_start",
+    }

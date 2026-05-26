@@ -13,23 +13,17 @@ __version__ = "0.0.1"
 __all__ = ["register"]
 
 
-def register(ctx) -> None:  # pragma: no cover - thin shim, exercised by integration tests
+def register(ctx):
     """Plugin entry point called by Hermes's plugin loader.
 
-    Wires the :func:`hermes_chat_recorder.recorder.on_pre_gateway_dispatch`
-    callback into the ``pre_gateway_dispatch`` hook, and arranges the
-    outbound-message wrapper via ``on_session_start``. The actual logic
-    lives in submodules so this entry-point stays small and easy to audit.
+    Delegates to :func:`hermes_chat_recorder.plugin.register`. Returns
+    the constructed :class:`Recorder` (or ``None`` when the plugin is
+    disabled in config), mirroring the inner function so tests can
+    inspect what was wired up.
 
-    Parameters
-    ----------
-    ctx:
-        Hermes plugin context. Provides ``register_hook(name, callback)``
-        among other surfaces. See ``hermes_cli/plugins.py`` upstream for
-        the full ``PluginContext`` interface.
+    Late imports keep the package import cheap when the plugin is
+    discovered but Hermes hasn't yet wired everything up.
     """
-    # Late imports keep the package import cheap when the plugin is
-    # discovered but Hermes hasn't yet wired everything up.
     from hermes_chat_recorder.plugin import register as _register
 
-    _register(ctx)
+    return _register(ctx)
