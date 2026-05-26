@@ -102,7 +102,19 @@ def _extract_timestamp(raw_message: Any) -> datetime:
 def _extract_mxc_and_media(
     raw_message: Any, kind: MessageKind
 ) -> tuple[str | None, str | None, int | None]:
-    """Return (mxc_url, mime, duration_sec) from the event content."""
+    """Return (mxc_url, mime, duration_sec) from the event content.
+
+    Handles two shapes:
+
+    * **Plaintext rooms** — ``content.url`` is the mxc.
+    * **End-to-end encrypted rooms** — ``content.file.url`` is the mxc;
+      ``content.file`` also carries ``key``, ``iv``, ``hashes``, ``v``.
+      We just return the URL; whether the bytes we download are
+      ciphertext (and need decryption upstream) depends on Hermes's
+      adapter behaviour. If they ARE ciphertext, faster-whisper will
+      fail with a clear "malformed audio" — the recorder writes a
+      `transcribe_failed` section per the design.
+    """
     if kind not in ("voice", "image"):
         return None, None, None
 
@@ -110,7 +122,13 @@ def _extract_mxc_and_media(
     if content is None:
         return None, None, None
 
+    # Prefer the plaintext url; fall back to the E2EE `file.url`.
     url = _get(content, "url")
+    if url is None:
+        encrypted_file = _get(content, "file")
+        if encrypted_file is not None:
+            url = _get(encrypted_file, "url")
+
     info = _get(content, "info", default={}) or {}
     mime = _get(info, "mimetype")
 

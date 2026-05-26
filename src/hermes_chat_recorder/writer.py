@@ -78,26 +78,38 @@ def render_section(section: Section) -> str:
     return "\n".join(lines) + "\n"
 
 
+_ANCHOR_PREFIX = "<!-- event:"
+
+
 def _find_existing_section(content: str, event_id: str) -> tuple[int, int, str] | None:
     """Locate an existing section by its event_id anchor.
 
     Returns ``(start, end, section_text)`` if found, else None.
     ``start`` is the index of the anchor; ``end`` is the index ONE PAST
-    the trailing ``\\n---\\n`` (so ``content[start:end]`` is the full
+    the section's content (so ``content[start:end]`` is the full
     section, replaceable wholesale).
+
+    Boundary detection prefers the NEXT anchor over the next ``\\n---\\n``
+    terminator. A transcript body can legitimately contain a standalone
+    ``---`` line (matt's notes use it as a manual separator); if we
+    naïvely trusted the first terminator after the anchor we'd splice
+    out only half the section and corrupt the next one. Anchors are
+    package-controlled and never appear inside user content, so they're
+    the reliable boundary.
     """
     anchor = _anchor(event_id)
     idx = content.find(anchor)
     if idx == -1:
         return None
-    # Search for the terminator after the anchor.
-    term_idx = content.find(_TERMINATOR, idx + len(anchor))
-    if term_idx == -1:
-        # Malformed (no terminator). Treat rest of file as the section
-        # so a subsequent write can replace it cleanly.
+
+    # Look for the NEXT anchor — that's the start of the section after ours.
+    next_anchor_idx = content.find(_ANCHOR_PREFIX, idx + len(anchor))
+    if next_anchor_idx == -1:
+        # We're the last section in the file; section runs to EOF.
         end = len(content)
     else:
-        end = term_idx + len(_TERMINATOR)
+        end = next_anchor_idx
+
     return idx, end, content[idx:end]
 
 

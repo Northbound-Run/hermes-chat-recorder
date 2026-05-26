@@ -226,6 +226,63 @@ def test_voice_extracts_mxc_mime_and_duration() -> None:
     assert info.duration_sec == 12  # ms / 1000, floored
 
 
+def test_voice_extracts_url_from_encrypted_file_block() -> None:
+    """E2EE Matrix rooms put the mxc URL inside content.file.url and
+    surround it with crypto metadata (key/iv/hashes/v). We still
+    extract the URL — downstream transcription may fail on ciphertext
+    but the recorder records the event durably regardless."""
+    event = SimpleNamespace(
+        source=_src(),
+        message_id="$encrypted_audio",
+        message_type=_msg_type("AUDIO"),
+        text="",
+        raw_message=_raw(
+            content={
+                "msgtype": "m.audio",
+                "file": {
+                    "url": "mxc://srv/encrypted-blob",
+                    "key": {"alg": "A256CTR", "k": "abc"},
+                    "iv": "AAAAAAA",
+                    "hashes": {"sha256": "deadbeef"},
+                    "v": "v2",
+                },
+                "info": {"mimetype": "audio/ogg", "duration": 8000},
+            }
+        ),
+    )
+    info = extract(event)
+    assert info is not None
+    assert info.kind == "voice"
+    assert info.mxc_url == "mxc://srv/encrypted-blob"
+    assert info.mime == "audio/ogg"
+    assert info.duration_sec == 8
+
+
+def test_image_extracts_url_from_encrypted_file_block() -> None:
+    event = SimpleNamespace(
+        source=_src(),
+        message_id="$encrypted_image",
+        message_type=_msg_type("IMAGE"),
+        text="",
+        raw_message=_raw(
+            content={
+                "msgtype": "m.image",
+                "file": {
+                    "url": "mxc://srv/encrypted-img",
+                    "key": {"k": "x"},
+                    "iv": "x",
+                    "hashes": {"sha256": "x"},
+                },
+                "info": {"mimetype": "image/jpeg"},
+            }
+        ),
+    )
+    info = extract(event)
+    assert info is not None
+    assert info.kind == "image"
+    assert info.mxc_url == "mxc://srv/encrypted-img"
+
+
 def test_voice_with_missing_info_is_still_extractable() -> None:
     event = SimpleNamespace(
         source=_src(),

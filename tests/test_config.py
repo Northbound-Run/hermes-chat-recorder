@@ -91,6 +91,21 @@ def test_unsupported_fields_loudly_rejected(field: str) -> None:
         load_config({"vault_root": "/x", field: True}, env={})
 
 
+def test_prewarm_whisper_default_false() -> None:
+    cfg = load_config({"vault_root": "/x"}, env={})
+    assert cfg.prewarm_whisper is False
+
+
+def test_prewarm_whisper_can_be_enabled() -> None:
+    cfg = load_config({"vault_root": "/x", "prewarm_whisper": True}, env={})
+    assert cfg.prewarm_whisper is True
+
+
+def test_prewarm_whisper_accepts_string_true() -> None:
+    cfg = load_config({"vault_root": "/x", "prewarm_whisper": "yes"}, env={})
+    assert cfg.prewarm_whisper is True
+
+
 def test_env_overrides_win_for_listed_keys() -> None:
     cfg = load_config(
         {

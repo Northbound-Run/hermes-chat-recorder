@@ -62,17 +62,76 @@ def register(ctx: Any) -> Recorder | None:
         )
         return recorder
 
+    _assert_hooks_available()
+
     ctx.register_hook("pre_gateway_dispatch", recorder.on_pre_gateway_dispatch)
     ctx.register_hook(
         "on_session_start", lambda **kw: _wire_matrix_adapter(recorder, **kw)
     )
 
+    if config.prewarm_whisper:
+        _kick_prewarm(recorder)
+
     logger.info(
-        "hermes_chat_recorder: registered (vault_root=%s, nicknames=%s)",
+        "hermes_chat_recorder: registered (vault_root=%s, nicknames=%s, prewarm=%s)",
         config.vault_root,
         list(config.nicknames),
+        config.prewarm_whisper,
     )
     return recorder
+
+
+def _assert_hooks_available() -> None:
+    """Best-effort guard against upstream Hermes renaming our hooks.
+
+    If Hermes ever renames ``pre_gateway_dispatch``, our plugin would
+    silently stop intercepting messages (the loader would log
+    "unknown hook" and skip). Checking ``VALID_HOOKS`` at register time
+    fails LOUDLY instead.
+
+    In test environments where ``hermes_cli.plugins`` isn't importable
+    we skip the check rather than artificially fail.
+    """
+    try:
+        from hermes_cli.plugins import VALID_HOOKS  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001 - import optional
+        logger.debug(
+            "hermes_chat_recorder: VALID_HOOKS unavailable (probably running outside Hermes); "
+            "skipping hook-name assertion."
+        )
+        return
+
+    required = {"pre_gateway_dispatch", "on_session_start"}
+    missing = required - set(VALID_HOOKS)
+    if missing:
+        raise RuntimeError(
+            "hermes_chat_recorder: required Hermes hooks missing from VALID_HOOKS: "
+            f"{sorted(missing)}. Has Hermes renamed them upstream?"
+        )
+
+
+def _kick_prewarm(recorder: Recorder) -> None:
+    """Spawn a daemon thread that loads the Whisper model so the first
+    voice note doesn't pay the ~10s model-load cost in the hot hook path.
+
+    Best-effort: any failure inside the prewarm thread is logged and
+    swallowed — we don't want plugin registration to fail just because
+    the model couldn't load. The lazy path inside
+    ``Recorder._get_transcriber`` will retry on first use.
+    """
+    import threading
+
+    def _go() -> None:
+        try:
+            recorder._get_transcriber()  # noqa: SLF001 - explicit prewarm hook
+            logger.info("hermes_chat_recorder: whisper prewarm complete")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes_chat_recorder: whisper prewarm failed: %s", exc)
+
+    t = threading.Thread(
+        target=_go, name="hcr-whisper-prewarm", daemon=True
+    )
+    t.start()
 
 
 def _read_plugin_block(ctx: Any) -> dict | None:

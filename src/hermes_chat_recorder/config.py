@@ -26,6 +26,7 @@ class RecorderConfig:
     whisper_model_size: str = "base"
     transcribe_failure_visible: bool = True
     pending_voice_ttl_seconds: int = 300
+    prewarm_whisper: bool = False
 
     # Resolved at load time from env. Empty string == not set.
     openrouter_api_key: str = ""
@@ -159,6 +160,12 @@ def load_config(
         field_name="transcribe_failure_visible",
     )
 
+    prewarm_whisper = _coerce_bool(
+        _opt("prewarm_whisper", False),
+        default=False,
+        field_name="prewarm_whisper",
+    )
+
     pending_voice_ttl_seconds_raw = _opt("pending_voice_ttl_seconds", 300)
     try:
         pending_voice_ttl_seconds = int(pending_voice_ttl_seconds_raw)
@@ -195,6 +202,7 @@ def load_config(
         whisper_model_size=whisper_model_size,
         transcribe_failure_visible=transcribe_failure_visible,
         pending_voice_ttl_seconds=pending_voice_ttl_seconds,
+        prewarm_whisper=prewarm_whisper,
         openrouter_api_key=openrouter_api_key,
         raw_block=block,
     )

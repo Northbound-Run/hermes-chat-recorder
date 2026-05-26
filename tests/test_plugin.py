@@ -318,6 +318,62 @@ class _AsyncDownloadAdapter:
         return b"AUDIO_FROM_ASYNC"
 
 
+def test_prewarm_whisper_kicks_background_thread(tmp_path: Path, monkeypatch) -> None:
+    """When prewarm_whisper=True, register() must spawn a daemon
+    thread that calls _get_transcriber so the first voice note doesn't
+    pay the model-load cost in the hot hook path.
+
+    We patch Recorder._get_transcriber to a sentinel that records it
+    was called, so the test doesn't actually load real faster-whisper.
+    """
+    import threading
+
+    from hermes_chat_recorder.recorder import Recorder
+
+    called = threading.Event()
+
+    def _fake_get_transcriber(self):
+        called.set()
+        return None
+
+    monkeypatch.setattr(Recorder, "_get_transcriber", _fake_get_transcriber)
+
+    hooks: list = []
+    ctx = _build_ctx(
+        {"vault_root": str(tmp_path), "prewarm_whisper": True}, hooks
+    )
+    register(ctx)
+
+    # The prewarm runs on a background daemon thread — give it a
+    # moment to call our patched method.
+    assert called.wait(timeout=2.0), "prewarm thread never invoked _get_transcriber"
+
+
+def test_prewarm_whisper_off_by_default_no_thread(tmp_path: Path, monkeypatch) -> None:
+    """The default prewarm_whisper=False must NOT trigger model load
+    at register() time — otherwise hermes-ceo boot time depends on
+    the model cache being warm."""
+    import threading
+
+    from hermes_chat_recorder.recorder import Recorder
+
+    called = threading.Event()
+
+    def _fake_get_transcriber(self):
+        called.set()
+        return None
+
+    monkeypatch.setattr(Recorder, "_get_transcriber", _fake_get_transcriber)
+
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    register(ctx)
+
+    # If a thread spawns, it'd fire within ~1s. Wait briefly and
+    # confirm nothing happened.
+    assert not called.wait(timeout=0.3), "prewarm fired even though prewarm_whisper=False"
+
+
 def test_async_download_callable_works_from_inside_running_loop(tmp_path: Path) -> None:
     """The killer scenario from Codex's #1 concern.
 

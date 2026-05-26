@@ -106,6 +106,27 @@ def test_find_existing_section_returns_none_when_missing() -> None:
     assert _find_existing_section(blob, "$missing") is None
 
 
+def test_find_existing_section_handles_literal_triple_dash_in_body() -> None:
+    """A transcript body containing a standalone `---` line must NOT
+    confuse the section-boundary detector. Anchors are package-
+    controlled; we use them as the boundary instead of the markdown
+    horizontal rule, which user content can legitimately contain."""
+    body_with_rule = "line one\n\n---\n\nline two with separator above"
+    s1 = render_section(_section(event_id="$with_rule", body=body_with_rule))
+    s2 = render_section(_section(event_id="$after", body="next section"))
+    blob = s1 + s2
+    found = _find_existing_section(blob, "$with_rule")
+    assert found is not None
+    start, end, text = found
+    # The boundary must land at the start of the $after anchor — NOT at
+    # the first `---` inside the body.
+    assert blob[end:].startswith("<!-- event:$after -->")
+    # The recovered section text contains the full body including the
+    # legit horizontal rule.
+    assert "---" in text
+    assert "line two with separator above" in text
+
+
 def test_find_existing_section_event_id_in_body_is_not_a_false_positive() -> None:
     """A user message that LITERALLY contains the anchor string in its
     body is unusual, but the anchor format includes the HTML-comment
@@ -186,6 +207,36 @@ def test_no_op_when_same_terminal_stage(tmp_path: Path) -> None:
     assert outcome == WriteOutcome.NO_OP
     day_file = tmp_path / ROOM / "2026-05-26.md"
     assert day_file.read_text().count("<!-- event:$abc:server -->") == 1
+
+
+def test_replace_section_with_triple_dash_in_body_keeps_next_intact(tmp_path: Path) -> None:
+    """End-to-end: a section whose body has `---` lines is replaced in
+    place, and the section AFTER it stays uncorrupted. This is the
+    real-world payoff for the anchor-not-terminator boundary fix."""
+    w = VaultWriter(vault_root=tmp_path)
+    body = "transcript line\n\n---\n\nsecond paragraph"
+    w.write_section(
+        _section(event_id="$first", stage="received", body=body), room_slug=ROOM
+    )
+    w.write_section(
+        _section(event_id="$second", stage="received", body="next section"),
+        room_slug=ROOM,
+    )
+
+    # Update $first to terminal stage with NEW body (still contains ---).
+    new_body = "updated transcript\n\n---\n\nupdated tail"
+    w.write_section(
+        _section(event_id="$first", stage="transcribed", body=new_body),
+        room_slug=ROOM,
+    )
+
+    content = (tmp_path / ROOM / "2026-05-26.md").read_text()
+    # $second still present and intact.
+    assert content.count("<!-- event:$second -->") == 1
+    assert "next section" in content
+    # $first updated to new body + terminal stage.
+    assert "updated transcript" in content
+    assert "stage:transcribed" in content
 
 
 def test_non_terminal_to_non_terminal_replaces(tmp_path: Path) -> None:
