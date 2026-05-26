@@ -519,3 +519,126 @@ def test_set_download_media_updates_handle(tmp_path: Path) -> None:
     event_b = _event(kind="AUDIO", text="", raw=_audio_raw(), message_id="$b")
     out_b = r.on_pre_gateway_dispatch(event=event_b)
     assert out_b == {"action": "rewrite", "text": "ok ralph"}
+
+
+# ---------------------------------------------------------------------------
+# Vault placeholder failure short-circuits the gate (Codex review fix)
+# ---------------------------------------------------------------------------
+
+
+def test_vault_placeholder_write_failure_returns_none(tmp_path: Path) -> None:
+    """If the vault write fails for the placeholder, we MUST NOT then
+    apply the wake gate against a missing archive — return None so the
+    gateway dispatches normally and the failure is loud in logs."""
+
+    r = _build_recorder(tmp_path)
+
+    # Replace writer.write_section with a function that raises.
+    def _boom(section, *, room_slug):  # noqa: ARG001
+        raise OSError("disk full")
+
+    r.writer.write_section = _boom  # type: ignore[method-assign]
+    result = r.on_pre_gateway_dispatch(event=_event(text="hi ralph"))
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# transcribe_failure_visible — give the agent something to respond to
+# when an @-mentioned voice note can't be transcribed
+# ---------------------------------------------------------------------------
+
+
+def test_transcribe_failure_visible_rewrites_when_at_mentioned(tmp_path: Path) -> None:
+    """Voice note fails to transcribe but the bot IS @-mentioned via
+    Matrix mention metadata. Gate wakes; the recorder substitutes a
+    placeholder message so the agent has something coherent."""
+    tx = _FakeTranscriber(raise_exc=TranscriberError("malformed audio"))
+    r = _build_recorder(
+        tmp_path,
+        nicknames=[],
+        transcriber=tx,
+        download_media=lambda m: b"x",
+    )
+    event = _event(
+        kind="AUDIO",
+        text="",
+        raw=SimpleNamespace(
+            origin_server_ts=1716729240000,
+            content={
+                "url": "mxc://srv/audio",
+                "info": {"mimetype": "audio/ogg", "duration": 5000},
+                "m.mentions": {"user_ids": [BOT]},
+            },
+        ),
+    )
+    result = r.on_pre_gateway_dispatch(event=event)
+    assert result is not None
+    assert result["action"] == "rewrite"
+    assert "transcription failed" in result["text"]
+
+
+def test_transcribe_failure_visible_off_returns_allow(tmp_path: Path) -> None:
+    """When the operator disables the visible-failure feature, we fall
+    back to allow + empty event.text (caller's problem)."""
+    cfg_overrides = RecorderConfig(
+        vault_root=tmp_path,
+        nicknames=(),
+        record_outbound=True,
+        transcribe_failure_visible=False,
+    )
+    writer = VaultWriter(vault_root=tmp_path, timezone="UTC")
+    gate = Gate([])
+    tx = _FakeTranscriber(raise_exc=TranscriberError("malformed audio"))
+    r = Recorder(
+        config=cfg_overrides,
+        writer=writer,
+        gate=gate,
+        transcriber=tx,
+        bot_mxid=BOT,
+        download_media=lambda m: b"x",
+    )
+    event = _event(
+        kind="AUDIO",
+        text="",
+        raw=SimpleNamespace(
+            origin_server_ts=1716729240000,
+            content={
+                "url": "mxc://srv/audio",
+                "info": {"mimetype": "audio/ogg", "duration": 5000},
+                "m.mentions": {"user_ids": [BOT]},
+            },
+        ),
+    )
+    result = r.on_pre_gateway_dispatch(event=event)
+    assert result == {"action": "allow"}
+
+
+def test_image_describe_failure_visible_falls_back_to_caption(tmp_path: Path) -> None:
+    """Image describe fails but the user @-mentioned the bot in the
+    CAPTION. We should rewrite to the caption + a placeholder note."""
+
+    @dataclass
+    class _DescBoom:
+        calls: list = field(default_factory=list)
+
+        def describe(self, image_bytes, *, mime=""):  # noqa: ARG002
+            from hermes_chat_recorder.describer import ImageDescriberError
+
+            raise ImageDescriberError("openrouter down")
+
+    r = _build_recorder(
+        tmp_path,
+        describer=_DescBoom(),
+        download_media=lambda m: b"IMG",
+        openrouter_api_key="sk-or-x",
+    )
+    event = _event(
+        kind="IMAGE",
+        text="ralph what is this",
+        raw=_image_raw(),
+    )
+    result = r.on_pre_gateway_dispatch(event=event)
+    assert result is not None
+    assert result["action"] == "rewrite"
+    # Caption preserved because describe_failed + visible-failure flag.
+    assert "ralph what is this" in result["text"]

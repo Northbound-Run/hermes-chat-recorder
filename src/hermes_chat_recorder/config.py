@@ -21,8 +21,6 @@ class RecorderConfig:
     vault_root: Path = Path("/data/vault/transcripts")
     nicknames: tuple[str, ...] = ()
     record_outbound: bool = True
-    record_image_bytes: bool = False
-    record_audio_bytes: bool = False
     timezone: str = "America/Los_Angeles"
     image_describer_model: str = "google/gemini-3-flash-preview"
     whisper_model_size: str = "base"
@@ -34,6 +32,38 @@ class RecorderConfig:
 
     # Stored for diagnostics + the readiness check.
     raw_block: dict[str, Any] = field(default_factory=dict, compare=False)
+
+
+_TRUTHY = {"true", "1", "yes", "on", "y", "t"}
+_FALSY = {"false", "0", "no", "off", "n", "f", ""}
+
+
+def _coerce_bool(value: Any, *, default: bool, field_name: str) -> bool:
+    """Defensively coerce a YAML / env value to a bool.
+
+    Naive ``bool(value)`` is unsafe — ``bool("false")`` returns True
+    because non-empty strings are truthy. We recognize the standard
+    YAML true/false vocabulary and refuse anything we don't recognize.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        norm = value.strip().lower()
+        if norm in _TRUTHY:
+            return True
+        if norm in _FALSY:
+            return False
+        raise ConfigError(
+            f"{field_name} got unparseable boolean string {value!r}; "
+            "use true/false, yes/no, or on/off"
+        )
+    raise ConfigError(
+        f"{field_name} expected bool, got {type(value).__name__}: {value!r}"
+    )
 
 
 class ConfigError(ValueError):
@@ -81,7 +111,7 @@ def load_config(
         val = block.get(key, default)
         return val if val is not None else default
 
-    enabled = bool(_opt("enabled", True))
+    enabled = _coerce_bool(_opt("enabled", True), default=True, field_name="enabled")
 
     vault_root_raw = _opt("vault_root", "/data/vault/transcripts")
     if not isinstance(vault_root_raw, (str, Path)):
@@ -101,9 +131,9 @@ def load_config(
         str(n).strip() for n in nicknames_raw if isinstance(n, str) and str(n).strip()
     )
 
-    record_outbound = bool(_opt("record_outbound", True))
-    record_image_bytes = bool(_opt("record_image_bytes", False))
-    record_audio_bytes = bool(_opt("record_audio_bytes", False))
+    record_outbound = _coerce_bool(
+        _opt("record_outbound", True), default=True, field_name="record_outbound"
+    )
 
     # timezone: env override wins; raw value validated downstream by ZoneInfo
     tz = env_map.get("TRANSCRIPT_TZ") or str(_opt("timezone", "America/Los_Angeles"))
@@ -123,7 +153,11 @@ def load_config(
         or str(_opt("whisper_model_size", "base"))
     )
 
-    transcribe_failure_visible = bool(_opt("transcribe_failure_visible", True))
+    transcribe_failure_visible = _coerce_bool(
+        _opt("transcribe_failure_visible", True),
+        default=True,
+        field_name="transcribe_failure_visible",
+    )
 
     pending_voice_ttl_seconds_raw = _opt("pending_voice_ttl_seconds", 300)
     try:
@@ -137,13 +171,25 @@ def load_config(
 
     openrouter_api_key = env_map.get("OPENROUTER_API_KEY", "") or ""
 
+    # NOTE: ``record_image_bytes`` and ``record_audio_bytes`` were in
+    # earlier drafts but are not implemented in v0.0.1 — they'd write
+    # original media binaries alongside transcripts. To avoid silently
+    # accepting config that does nothing, we EXPLICITLY reject them
+    # here so users see the gap immediately rather than wondering why
+    # their flag didn't take effect.
+    for unsupported in ("record_image_bytes", "record_audio_bytes"):
+        if unsupported in block:
+            raise ConfigError(
+                f"{unsupported} is not yet implemented in this version of "
+                "hermes-chat-recorder; remove it from your config until v0.1.0 "
+                "lands the media-byte-preservation feature."
+            )
+
     return RecorderConfig(
         enabled=enabled,
         vault_root=vault_root,
         nicknames=nicknames,
         record_outbound=record_outbound,
-        record_image_bytes=record_image_bytes,
-        record_audio_bytes=record_audio_bytes,
         timezone=tz,
         image_describer_model=image_describer_model,
         whisper_model_size=whisper_model_size,

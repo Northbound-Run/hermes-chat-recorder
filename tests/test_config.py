@@ -27,8 +27,6 @@ def test_block_values_override_defaults() -> None:
             "vault_root": "/tmp/vault",
             "nicknames": ["ralph", "Ralphy"],
             "record_outbound": False,
-            "record_image_bytes": True,
-            "record_audio_bytes": True,
             "timezone": "Europe/London",
             "image_describer_model": "anthropic/claude-3-5-sonnet",
             "whisper_model_size": "small",
@@ -40,13 +38,57 @@ def test_block_values_override_defaults() -> None:
     assert cfg.vault_root == Path("/tmp/vault")
     assert cfg.nicknames == ("ralph", "Ralphy")
     assert cfg.record_outbound is False
-    assert cfg.record_image_bytes is True
-    assert cfg.record_audio_bytes is True
     assert cfg.timezone == "Europe/London"
     assert cfg.image_describer_model == "anthropic/claude-3-5-sonnet"
     assert cfg.whisper_model_size == "small"
     assert cfg.transcribe_failure_visible is False
     assert cfg.pending_voice_ttl_seconds == 90
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("True", True),
+        ("YES", True),
+        ("on", True),
+        ("1", True),
+        ("false", False),
+        ("False", False),
+        ("no", False),
+        ("off", False),
+        ("0", False),
+        ("", False),
+        (1, True),
+        (0, False),
+    ],
+)
+def test_bool_coercion_accepts_known_values(raw, expected: bool) -> None:
+    cfg = load_config(
+        {"vault_root": "/x", "record_outbound": raw}, env={}
+    )
+    assert cfg.record_outbound is expected
+
+
+@pytest.mark.parametrize("bad", ["maybe", "tru", "nope", "2"])
+def test_bool_coercion_rejects_unknown_strings(bad: str) -> None:
+    with pytest.raises(ConfigError, match="boolean string"):
+        load_config({"vault_root": "/x", "record_outbound": bad}, env={})
+
+
+def test_bool_coercion_rejects_wrong_type() -> None:
+    with pytest.raises(ConfigError, match="expected bool"):
+        load_config({"vault_root": "/x", "record_outbound": ["lol"]}, env={})
+
+
+@pytest.mark.parametrize("field", ["record_image_bytes", "record_audio_bytes"])
+def test_unsupported_fields_loudly_rejected(field: str) -> None:
+    """v0.0.1 doesn't implement media-byte preservation — reject the
+    flag explicitly so users don't think it works."""
+    with pytest.raises(ConfigError, match="not yet implemented"):
+        load_config({"vault_root": "/x", field: True}, env={})
 
 
 def test_env_overrides_win_for_listed_keys() -> None:

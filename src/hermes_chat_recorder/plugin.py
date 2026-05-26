@@ -172,12 +172,12 @@ def _resolve_download_callable(adapter: Any):
     ``adapter.client.download_media``. We try a few patterns.
 
     All known shapes are async; the recorder runs in a sync hook, so
-    we adapt with ``asyncio.run`` on a fresh loop when called. This is
-    NOT ideal (it creates a loop each call) but it's the only way to
-    bridge sync↔async from inside a sync plugin hook. Optimize later
-    if it shows up in profiles.
+    we bridge via a dedicated background asyncio loop (see
+    :mod:`_background_loop`). ``asyncio.run`` is NOT safe here — it
+    raises ``RuntimeError: asyncio.run() cannot be called from a
+    running event loop`` when invoked from the gateway's main thread.
     """
-    import asyncio
+    import inspect
 
     candidates = []
     for attr in ("download_media", "download_mxc"):
@@ -197,34 +197,39 @@ def _resolve_download_callable(adapter: Any):
 
     def _sync_download(mxc_url: str) -> bytes:
         result = download_fn(mxc_url)
-        if asyncio.iscoroutine(result):
-            return asyncio.run(_await_coroutine(result))
+        if inspect.isawaitable(result):
+            from hermes_chat_recorder._background_loop import get_background_loop
+
+            return get_background_loop().run_coro_sync(result)
         return result
 
     return _sync_download
 
 
-async def _await_coroutine(coro):  # pragma: no cover - thin async-helper
-    return await coro
-
-
 def _wrap_send(adapter: Any, recorder: Recorder) -> None:
     """Idempotently replace ``adapter.send`` with a wrapper that
-    records outbound replies after a successful send."""
+    records outbound replies after a successful send.
+
+    Handles three function shapes:
+
+    * Pure sync — ``def send(...) -> SendResult``
+    * Pure async — ``async def send(...) -> SendResult``
+    * Sync function returning awaitable — ``def send(...) -> Coroutine``
+      (this is the trap Codex caught — ``iscoroutinefunction`` returns
+      False for these, but the result needs awaiting before we record)
+    """
     if getattr(adapter, "_chat_recorder_send_wrapped", False):
         return  # already wrapped
     original_send = getattr(adapter, "send", None)
     if not callable(original_send):
         return
 
-    import asyncio
     import inspect
 
-    is_coro = inspect.iscoroutinefunction(original_send)
-
+    is_coro_fn = inspect.iscoroutinefunction(original_send)
     bot_mxid = recorder.bot_mxid
 
-    if is_coro:
+    if is_coro_fn:
 
         async def wrapped(chat_id, text, *args, **kwargs):
             result = await original_send(chat_id, text, *args, **kwargs)
@@ -234,6 +239,15 @@ def _wrap_send(adapter: Any, recorder: Recorder) -> None:
 
         def wrapped(chat_id, text, *args, **kwargs):  # type: ignore[misc]
             result = original_send(chat_id, text, *args, **kwargs)
+            # Some adapter decorators present a sync surface but return
+            # a coroutine. If we record on the coroutine object the
+            # event_id is missing and the recorded "send" might never
+            # actually complete. Bridge via the background loop so we
+            # both record the real result AND propagate any errors.
+            if inspect.isawaitable(result):
+                from hermes_chat_recorder._background_loop import get_background_loop
+
+                result = get_background_loop().run_coro_sync(result)
             _record_outbound(recorder, adapter, chat_id, text, result, bot_mxid)
             return result
 

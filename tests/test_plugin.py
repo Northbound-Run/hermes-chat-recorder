@@ -258,3 +258,90 @@ def test_bot_mxid_resolved_via_config_attr(tmp_path: Path) -> None:
     )
     on_start(gateway=_build_gateway(adapter))
     assert recorder.bot_mxid == "@from_config:srv"
+
+
+# ---------------------------------------------------------------------------
+# Sync↔async bridges (Codex review fixes)
+# ---------------------------------------------------------------------------
+
+
+class _SyncReturningCoroAdapter:
+    """The trap shape: `send` looks sync (not declared async def) but
+    returns an awaitable. ``inspect.iscoroutinefunction`` returns False
+    so the old sync wrapper recorded the coroutine object, not the
+    awaited result. Codex caught this — the wrapper now detects via
+    ``isawaitable`` and bridges via the background loop."""
+
+    def __init__(self) -> None:
+        self.user_id = "@ralph:srv"
+
+    def send(self, chat_id: str, text: str, **_):  # type: ignore[no-untyped-def]
+        async def _real_send():
+            await asyncio.sleep(0.01)
+            return _FakeSendResult(event_id="$bridged:srv")
+
+        return _real_send()
+
+
+def test_wrap_send_handles_sync_function_returning_coroutine(tmp_path: Path) -> None:
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    register(ctx)
+    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+
+    adapter = _SyncReturningCoroAdapter()
+    on_start(gateway=_build_gateway(adapter))
+
+    # Caller is sync; result must be awaited via the background loop
+    # before we record. Without the fix, the recorded event_id would
+    # have been a synthetic timestamp fallback.
+    result = adapter.send("!room:srv", "hi via sync-returning-coro")
+    assert isinstance(result, _FakeSendResult)
+    assert result.event_id == "$bridged:srv"
+
+    content = next(tmp_path.rglob("*.md")).read_text()
+    assert "<!-- event:$bridged:srv -->" in content
+    assert "hi via sync-returning-coro" in content
+
+
+class _AsyncDownloadAdapter:
+    def __init__(self) -> None:
+        self.user_id = "@ralph:srv"
+        self.send_calls: list = []
+
+    def send(self, chat_id, text, **_):
+        self.send_calls.append((chat_id, text))
+        return _FakeSendResult(event_id="$x")
+
+    async def download_media(self, mxc: str) -> bytes:  # noqa: ARG002
+        await asyncio.sleep(0.01)
+        return b"AUDIO_FROM_ASYNC"
+
+
+def test_async_download_callable_works_from_inside_running_loop(tmp_path: Path) -> None:
+    """The killer scenario from Codex's #1 concern.
+
+    ``_resolve_download_callable`` wraps the adapter's async
+    download_media for sync callers. Old impl used ``asyncio.run`` which
+    raises ``RuntimeError: asyncio.run() cannot be called from a
+    running event loop`` when called from a thread that already has
+    a loop running — exactly Hermes's hot path. The fix routes through
+    a dedicated background-loop singleton.
+    """
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    recorder = register(ctx)
+    assert recorder is not None
+    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+
+    adapter = _AsyncDownloadAdapter()
+    on_start(gateway=_build_gateway(adapter))
+    assert recorder._download_media is not None  # noqa: SLF001
+
+    async def _drive() -> bytes:
+        # Inside a running event loop on this thread. The bridge MUST
+        # still return bytes synchronously.
+        return recorder._download_media("mxc://x/y")  # noqa: SLF001
+
+    result = asyncio.run(_drive())
+    assert result == b"AUDIO_FROM_ASYNC"

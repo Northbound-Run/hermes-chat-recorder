@@ -154,17 +154,30 @@ class Recorder:
             return {"action": "skip", "reason": "sync-replay-duplicate"}
 
         # 1) Persist a placeholder section so the event is durable even
-        #    if downstream processing crashes.
-        self._write_placeholder(info, room_slug)
+        #    if downstream processing crashes. If the vault write fails
+        #    we must NOT then make a wake decision against a missing
+        #    archive — return None (passthrough) so the gateway
+        #    dispatches normally and the failure is loud in logs.
+        if not self._write_placeholder(info, room_slug):
+            logger.error(
+                "transcript_recorder: vault placeholder write failed for "
+                "event %s in %s; skipping gate and passing through",
+                info.event_id,
+                room_slug,
+            )
+            return None
 
         # 2) Process media (voice → transcript, image → description),
         #    upgrade the section to its terminal stage.
         gate_text = info.body
         rewrite_text: str | None = None
+        voice_failed = False
+        image_failed = False
 
         if info.kind == "voice":
             transcript, ok = self._process_voice(info, room_slug)
             gate_text = transcript
+            voice_failed = not ok
             if ok and transcript:
                 rewrite_text = transcript
         elif info.kind == "image":
@@ -172,6 +185,7 @@ class Recorder:
             # Gate on caption + OCR text only — model-generated description
             # MUST NOT be allowed to false-wake the agent.
             gate_text = (info.body + "\n" + ocr_text).strip()
+            image_failed = not ok
             if ok and (description or ocr_text):
                 rewrite_text = self._format_image_rewrite(info.body, description, ocr_text)
 
@@ -187,6 +201,22 @@ class Recorder:
 
         if not wake:
             return {"action": "skip", "reason": "no-mention-or-nickname"}
+
+        # transcribe_failure_visible: if voice failed but the @-mention
+        # path woke him anyway (sender's intent was clear), give the
+        # agent SOMETHING coherent to respond to instead of an empty
+        # event.text. Same idea for image describe failures.
+        if rewrite_text is None and self.config.transcribe_failure_visible:
+            if voice_failed:
+                rewrite_text = (
+                    "[voice note — transcription failed; please retry "
+                    "or send as text]"
+                )
+            elif image_failed:
+                rewrite_text = (
+                    info.body
+                    or "[image — description failed; please retry or describe in text]"
+                )
 
         if rewrite_text is not None:
             return {"action": "rewrite", "text": rewrite_text}
@@ -232,7 +262,13 @@ class Recorder:
     # internals
     # ------------------------------------------------------------------
 
-    def _write_placeholder(self, info: MatrixEventInfo, room_slug: str) -> None:
+    def _write_placeholder(self, info: MatrixEventInfo, room_slug: str) -> bool:
+        """Write the initial placeholder section. Returns True on
+        success, False on failure. The "always store" guarantee in
+        ``docs/DESIGN.md §6`` means a False return here must short-
+        circuit the wake decision in the caller — the gate cannot
+        produce a meaningful answer against a missing archive.
+        """
         fields = self._fields_for(info)
         body = info.body if info.kind == "text" else "(processing media…)"
         section = Section(
@@ -246,8 +282,15 @@ class Recorder:
         )
         try:
             self.writer.write_section(section, room_slug=room_slug)
-        except Exception as exc:  # noqa: BLE001 - logged, but we keep going
-            logger.warning("transcript_recorder: placeholder write failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "transcript_recorder: placeholder write failed for %s in %s: %s",
+                info.event_id,
+                room_slug,
+                exc,
+            )
+            return False
+        return True
 
     def _fields_for(self, info: MatrixEventInfo) -> dict[str, str]:
         fields: dict[str, str] = {}
