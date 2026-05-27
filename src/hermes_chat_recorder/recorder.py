@@ -320,20 +320,14 @@ class Recorder:
         return fields
 
     def _process_voice(self, info: MatrixEventInfo, room_slug: str) -> tuple[str, bool]:
-        """Download + transcribe a voice note. Always writes a terminal
-        section to the vault. Returns (transcript, success).
+        """Transcribe a voice note. Always writes a terminal section.
+
+        Prefers ``info.local_media_path`` (set by the Matrix adapter
+        after it downloads + decrypts the audio) so we don't need a
+        ``download_media`` callable at all. Falls back to the
+        ``mxc_url + self._download_media`` path for legacy events that
+        somehow lack the cached path.
         """
-        download = self._download_media
-
-        if download is None or not info.mxc_url:
-            self._write_terminal(
-                info,
-                room_slug,
-                stage="transcribe_failed",
-                body="(download unavailable)",
-            )
-            return "", False
-
         transcriber = self._get_transcriber()
         if transcriber is None:
             self._write_terminal(
@@ -345,8 +339,23 @@ class Recorder:
             return "", False
 
         try:
-            audio_bytes = download(info.mxc_url)
-            transcript = self._transcribe_bytes(transcriber, audio_bytes, info.mime or "audio/ogg")
+            if info.local_media_path:
+                # Hermes already downloaded + decrypted the bytes — just
+                # hand the path to the STT layer.
+                transcript = transcriber.transcribe(info.local_media_path)
+            elif self._download_media and info.mxc_url:
+                audio_bytes = self._download_media(info.mxc_url)
+                transcript = self._transcribe_bytes(
+                    transcriber, audio_bytes, info.mime or "audio/ogg"
+                )
+            else:
+                self._write_terminal(
+                    info,
+                    room_slug,
+                    stage="transcribe_failed",
+                    body="(no local path and no download callable)",
+                )
+                return "", False
         except TranscriberError as exc:
             self._write_terminal(
                 info,
@@ -371,18 +380,13 @@ class Recorder:
     def _process_image(
         self, info: MatrixEventInfo, room_slug: str
     ) -> tuple[str, str, bool]:
-        """Download + describe an image. Returns (description, ocr_text, success)."""
-        download = self._download_media
+        """Describe an image. Returns (description, ocr_text, success).
 
-        if download is None or not info.mxc_url:
-            self._write_terminal(
-                info,
-                room_slug,
-                stage="describe_failed",
-                body="(download unavailable)",
-            )
-            return "", "", False
-
+        Prefers ``info.local_media_path`` (already downloaded +
+        decrypted by the Matrix adapter); falls back to fetching the
+        ``mxc_url`` via the legacy download callable when the cached
+        path is missing.
+        """
         describer = self._get_describer()
         if describer is None:
             self._write_terminal(
@@ -394,7 +398,19 @@ class Recorder:
             return "", "", False
 
         try:
-            image_bytes = download(info.mxc_url)
+            if info.local_media_path:
+                with open(info.local_media_path, "rb") as f:
+                    image_bytes = f.read()
+            elif self._download_media and info.mxc_url:
+                image_bytes = self._download_media(info.mxc_url)
+            else:
+                self._write_terminal(
+                    info,
+                    room_slug,
+                    stage="describe_failed",
+                    body="(no local path and no download callable)",
+                )
+                return "", "", False
             result = describer.describe(image_bytes, mime=info.mime or "image/png")
         except ImageDescriberError as exc:
             self._write_terminal(

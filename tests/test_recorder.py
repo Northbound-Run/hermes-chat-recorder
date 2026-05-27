@@ -202,6 +202,34 @@ def test_duplicate_event_id_is_not_double_recorded(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_voice_uses_local_media_path_when_available(tmp_path: Path) -> None:
+    """When the Matrix adapter has already cached + decrypted the audio
+    bytes to disk, the recorder should hand the file path straight to
+    the transcriber instead of trying to download via mxc URL.
+    """
+    audio_file = tmp_path / "voice.ogg"
+    audio_file.write_bytes(b"OggS\x00...")
+
+    tx = _FakeTranscriber(return_value="from local path")
+    r = _build_recorder(tmp_path, transcriber=tx, download_media=None)
+    event = SimpleNamespace(
+        text="",
+        message_id="$evtlocal:srv",
+        message_type=_matrix_msg_type("AUDIO"),
+        source=SimpleNamespace(
+            platform=SimpleNamespace(value="matrix"),
+            chat_id=ROOM,
+            user_id=ANNIKA,
+        ),
+        raw_message=_audio_raw(),
+        media_urls=[str(audio_file)],
+    )
+    result = r.on_pre_gateway_dispatch(event=event)
+    assert result == {"action": "rewrite", "text": "from local path"}
+    # Transcriber was handed the cached path verbatim.
+    assert tx.calls == [str(audio_file)]
+
+
 def test_voice_transcribed_rewrites_event_text(tmp_path: Path) -> None:
     tx = _FakeTranscriber(return_value="hey transcribed message")
     r = _build_recorder(tmp_path, transcriber=tx, download_media=lambda mxc: b"audiobytes")
@@ -257,6 +285,35 @@ def test_voice_with_transcriber_exception_marks_failed(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Image path → describe + rewrite event.text
 # ---------------------------------------------------------------------------
+
+
+def test_image_uses_local_media_path_when_available(tmp_path: Path) -> None:
+    """Same shortcut for images: read the locally-cached file rather
+    than re-downloading from the mxc URL."""
+    image_file = tmp_path / "pic.png"
+    image_file.write_bytes(b"\x89PNG\r\n\x1a\nlocalbytes")
+
+    desc = _FakeDescriber(
+        return_value=DescribeResult(description="Local image", text="", raw="")
+    )
+    r = _build_recorder(tmp_path, describer=desc, download_media=None)
+    event = SimpleNamespace(
+        text="hey look",
+        message_id="$imglocal:srv",
+        message_type=_matrix_msg_type("IMAGE"),
+        source=SimpleNamespace(
+            platform=SimpleNamespace(value="matrix"),
+            chat_id=ROOM,
+            user_id=ANNIKA,
+        ),
+        raw_message=_image_raw(),
+        media_urls=[str(image_file)],
+    )
+    result = r.on_pre_gateway_dispatch(event=event)
+    assert result is not None
+    assert "Local image" in result["text"]
+    # Describer saw the actual cached bytes.
+    assert desc.calls == [b"\x89PNG\r\n\x1a\nlocalbytes"]
 
 
 def test_image_described_rewrites_with_caption_and_description(tmp_path: Path) -> None:

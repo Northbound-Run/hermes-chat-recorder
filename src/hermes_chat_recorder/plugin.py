@@ -251,10 +251,14 @@ def _wire_name_resolver(recorder: Recorder, adapter: Any) -> None:
     has filesystem-slug and MXID-localpart fallbacks, so a wiring
     failure just means we keep using those.
     """
-    client = getattr(adapter, "client", None)
+    # Hermes's MatrixAdapter stores the mautrix client on the private
+    # attribute ``_client`` (see gateway/platforms/matrix.py:346). Try
+    # the public name first for forward-compat in case upstream renames
+    # it, then fall back to the underscore-prefixed real attribute.
+    client = getattr(adapter, "client", None) or getattr(adapter, "_client", None)
     if client is None:
         logger.info(
-            "hermes_chat_recorder: matrix adapter exposes no .client; "
+            "hermes_chat_recorder: matrix adapter exposes no .client or ._client; "
             "names will fall back to MXIDs and room-ID slugs."
         )
         return
@@ -377,7 +381,9 @@ def _resolve_download_callable(adapter: Any):
         fn = getattr(adapter, attr, None)
         if fn is not None:
             candidates.append(fn)
-    client = getattr(adapter, "client", None)
+    # Public name first, then the mautrix-private ``_client`` Hermes
+    # actually uses.
+    client = getattr(adapter, "client", None) or getattr(adapter, "_client", None)
     if client is not None:
         for attr in ("download_media", "download_mxc"):
             fn = getattr(client, attr, None)

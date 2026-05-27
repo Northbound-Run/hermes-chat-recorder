@@ -32,6 +32,13 @@ class MatrixEventInfo:
     kind: MessageKind
     body: str
     mxc_url: str | None = None
+    # Local filesystem path of the already-downloaded (and decrypted, in
+    # E2EE rooms) media bytes. Populated by the Matrix adapter via
+    # ``MessageEvent.media_urls[0]``. Using this instead of re-downloading
+    # via the mautrix client avoids private-attr access, sidesteps E2EE
+    # decryption duplication, and works whether or not we have a live
+    # client handle.
+    local_media_path: str | None = None
     mime: str | None = None
     duration_sec: int | None = None
     mentioned_mxids: frozenset[str] = frozenset()
@@ -220,6 +227,7 @@ def extract(event: Any) -> MatrixEventInfo | None:
         return None
 
     mxc_url, mime, duration_sec = _extract_mxc_and_media(raw, kind)
+    local_media_path = _extract_local_media_path(event, kind)
     return MatrixEventInfo(
         event_id=str(event_id),
         room_id=str(chat_id),
@@ -229,11 +237,34 @@ def extract(event: Any) -> MatrixEventInfo | None:
         kind=kind,
         body=str(_get(event, "text", default="") or ""),
         mxc_url=mxc_url,
+        local_media_path=local_media_path,
         mime=mime,
         duration_sec=duration_sec,
         mentioned_mxids=_extract_mentions(raw),
         is_reaction=False,
     )
+
+
+def _extract_local_media_path(event: Any, kind: MessageKind) -> str | None:
+    """Pull a locally-cached media path off the Hermes ``MessageEvent``.
+
+    The matrix adapter populates ``MessageEvent.media_urls = [cached_path]``
+    after downloading (and decrypting, in E2EE rooms) the media bytes.
+    When that's present we'd much rather point our STT/vision tools at
+    the cached file than re-download the mxc URL ourselves.
+    """
+    if kind not in ("voice", "image"):
+        return None
+    urls = _get(event, "media_urls")
+    if not urls:
+        return None
+    if isinstance(urls, (list, tuple)) and urls:
+        candidate = urls[0]
+        if isinstance(candidate, str) and candidate and not candidate.startswith(
+            ("http://", "https://", "mxc://")
+        ):
+            return candidate
+    return None
 
 
 def room_slug_from_room_id(room_id: str) -> str:
