@@ -29,9 +29,11 @@ from hermes_chat_recorder.config import RecorderConfig
 from hermes_chat_recorder.describer import ImageDescriber, ImageDescriberError
 from hermes_chat_recorder.matrix_event import (
     MatrixEventInfo,
-    extract as extract_matrix_event,
-    room_slug_from_room_id,
 )
+from hermes_chat_recorder.matrix_event import (
+    extract as extract_matrix_event,
+)
+from hermes_chat_recorder.name_resolver import NameResolver
 from hermes_chat_recorder.transcriber import Transcriber, TranscriberError
 from hermes_chat_recorder.types import Section
 from hermes_chat_recorder.writer import VaultWriter
@@ -43,6 +45,11 @@ logger = logging.getLogger(__name__)
 # the live Matrix adapter's media-download method. None means "skip
 # media processing this turn" — sections stay at stage:received.
 DownloadMedia = Callable[[str], bytes]
+
+
+def _looks_like_mxid(s: str) -> bool:
+    """Heuristic for ``@localpart:server`` shaped strings."""
+    return s.startswith("@") and ":" in s
 
 
 class Recorder:
@@ -60,6 +67,7 @@ class Recorder:
         *,
         config: RecorderConfig,
         writer: VaultWriter,
+        resolver: NameResolver | None = None,
         transcriber: Transcriber | None = None,
         describer: ImageDescriber | None = None,
         bot_mxid: str = "",
@@ -67,6 +75,10 @@ class Recorder:
     ) -> None:
         self.config = config
         self.writer = writer
+        # Resolver defaults to a bare instance with no lookups wired —
+        # falls back to room_slug_from_room_id / MXID localpart until
+        # plugin.on_session_start binds the live Matrix client.
+        self.resolver = resolver if resolver is not None else NameResolver()
         self._transcriber = transcriber
         self._describer = describer
         self.bot_mxid = bot_mxid
@@ -89,26 +101,19 @@ class Recorder:
     def _get_transcriber(self) -> Transcriber | None:
         if self._transcriber is None:
             try:
-                self._transcriber = Transcriber(model_size=self.config.whisper_model_size)
-            except Exception as exc:  # noqa: BLE001
+                self._transcriber = Transcriber()
+            except Exception as exc:
                 logger.warning(
-                    "hermes_chat_recorder: failed to load faster-whisper '%s': %s",
-                    self.config.whisper_model_size,
-                    exc,
+                    "hermes_chat_recorder: failed to construct transcriber: %s", exc
                 )
                 return None
         return self._transcriber
 
     def _get_describer(self) -> ImageDescriber | None:
         if self._describer is None:
-            if not self.config.openrouter_api_key:
-                return None
             try:
-                self._describer = ImageDescriber(
-                    api_key=self.config.openrouter_api_key,
-                    model=self.config.image_describer_model,
-                )
-            except Exception as exc:  # noqa: BLE001
+                self._describer = ImageDescriber()
+            except Exception as exc:
                 logger.warning(
                     "hermes_chat_recorder: failed to construct describer: %s", exc
                 )
@@ -137,7 +142,7 @@ class Recorder:
         """
         try:
             info = extract_matrix_event(event)
-        except Exception as exc:  # noqa: BLE001 - defensive
+        except Exception as exc:
             logger.warning("hermes_chat_recorder: extract failed: %s", exc)
             return None
 
@@ -149,7 +154,7 @@ class Recorder:
             # Reactions don't get recorded.
             return None
 
-        room_slug = room_slug_from_room_id(info.room_id)
+        room_slug = self.resolver.room_slug(info.room_id)
 
         # Sync-replay duplicate — already in the vault. Don't double-
         # record and don't fight Hermes's own dedupe.
@@ -210,14 +215,18 @@ class Recorder:
         """Record the bot's own reply to the vault."""
         if not self.config.record_outbound:
             return
-        room_slug = room_slug_from_room_id(room_id)
+        room_slug = self.resolver.room_slug(room_id)
+        # If the caller passed something MXID-shaped (or empty), let the
+        # resolver pick a friendlier display name; otherwise honor the
+        # explicit string the caller supplied.
+        sender = self._best_display(sender_display, self.bot_mxid) or "bot"
         fields: dict[str, str] = {}
         if reply_to_event_id:
             fields["reply_to"] = reply_to_event_id
         section = Section(
             event_id=event_id,
             timestamp=timestamp,
-            sender=sender_display or "bot",
+            sender=sender,
             kind="reply",
             stage="sent",
             fields=fields,
@@ -225,7 +234,7 @@ class Recorder:
         )
         try:
             self.writer.write_section(section, room_slug=room_slug)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("hermes_chat_recorder: outbound write failed: %s", exc)
 
     # ------------------------------------------------------------------
@@ -239,7 +248,7 @@ class Recorder:
         section = Section(
             event_id=info.event_id,
             timestamp=info.timestamp,
-            sender=info.sender_display,
+            sender=self._best_display(info.sender_display, info.sender_mxid),
             kind=info.kind,
             stage="received",
             fields=fields,
@@ -247,7 +256,7 @@ class Recorder:
         )
         try:
             self.writer.write_section(section, room_slug=room_slug)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error(
                 "hermes_chat_recorder: placeholder write failed for %s in %s: %s",
                 info.event_id,
@@ -256,6 +265,20 @@ class Recorder:
             )
             return False
         return True
+
+    def _best_display(self, hint: str, mxid: str) -> str:
+        """Return the friendliest available display string for a sender.
+
+        ``hint`` is whatever the caller already has on hand — mautrix's
+        enriched ``sender_display_name`` for inbound events, or an
+        explicit string for outbound bot replies. If it's empty, equal
+        to the MXID, or looks like an MXID itself, defer to the
+        resolver's lookup chain. Otherwise honor the hint verbatim so
+        callers can override (e.g. tests passing ``"Ralph"``).
+        """
+        if hint and hint != mxid and not _looks_like_mxid(hint):
+            return hint
+        return self.resolver.user_display(mxid)
 
     def _fields_for(self, info: MatrixEventInfo) -> dict[str, str]:
         fields: dict[str, str] = {}
@@ -303,7 +326,7 @@ class Recorder:
                 body=f"(transcription failed: {exc})",
             )
             return "", False
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._write_terminal(
                 info,
                 room_slug,
@@ -352,7 +375,7 @@ class Recorder:
                 body=f"(description failed: {exc})",
             )
             return "", "", False
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._write_terminal(
                 info,
                 room_slug,
@@ -382,7 +405,7 @@ class Recorder:
         section = Section(
             event_id=info.event_id,
             timestamp=info.timestamp,
-            sender=info.sender_display,
+            sender=self._best_display(info.sender_display, info.sender_mxid),
             kind=info.kind,
             stage=stage,  # type: ignore[arg-type]
             fields=fields,
@@ -390,7 +413,7 @@ class Recorder:
         )
         try:
             self.writer.write_section(section, room_slug=room_slug)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("hermes_chat_recorder: terminal write failed: %s", exc)
 
     def _transcribe_bytes(

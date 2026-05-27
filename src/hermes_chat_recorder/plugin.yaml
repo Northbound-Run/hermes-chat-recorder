@@ -1,22 +1,15 @@
 name: chat_recorder
-version: 0.1.0
-description: "Record every Hermes Matrix chat message into a vault (text, voice transcripts, image descriptions). Wake gating is owned by Hermes's native settings."
+version: 0.3.0
+description: "Record every Hermes Matrix chat message into a vault (text, voice transcripts, image descriptions). Pretty room/user names. STT and vision delegated to Hermes's built-in tools."
 author: Northbound
 license: MIT
 homepage: https://github.com/northbound-run/hermes-chat-recorder
 kind: standalone
 
-# Hermes plugin loader recognizes these for setup-wizard prompts and
-# the `hermes gateway status` view.
+# This plugin no longer reads any env vars of its own. STT credentials
+# (Groq / OpenAI / Mistral / xAI) and vision providers are managed by
+# Hermes via the top-level `stt:` and `auxiliary.vision:` config blocks.
 optional_env:
-  OPENROUTER_API_KEY:
-    description: "OpenRouter API key for image description. If unset, images are recorded without an AI-generated description."
-    url: "https://openrouter.ai/keys"
-    is_password: true
-  IMAGE_DESCRIBER_MODEL:
-    description: "Override the OpenRouter model used to describe images (default: google/gemini-3-flash-preview)."
-  WHISPER_MODEL_SIZE:
-    description: "Override the faster-whisper model size (tiny, base, small, medium, large-v3). Default: base."
   TRANSCRIPT_TZ:
     description: "Timezone for day-boundary in the markdown vault filenames (default: America/Los_Angeles)."
 

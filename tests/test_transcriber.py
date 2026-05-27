@@ -1,48 +1,42 @@
-"""Tests for the faster-whisper wrapper.
+"""Tests for the Hermes-delegating Transcriber.
 
-The real model is too heavy to load in unit tests, so we inject a fake
-that conforms to the WhisperLike protocol. The tests verify:
+The transcriber now wraps ``tools.transcription_tools.transcribe_audio``
+instead of faster-whisper directly. We inject a fake transcribe_fn
+that records calls and returns canned response dicts.
 
-- Segment joining + whitespace handling
-- Empty / blank-segment behaviour
-- TranscriberError wrapping on model exceptions
-- Lock serialization keeps two threads from interleaving model access
+Covers:
+- Transcript text passes through unchanged (whitespace stripped)
+- ``success=false`` → TranscriberError with the upstream error message
+- Underlying function raising → TranscriberError
+- Non-dict return → TranscriberError
+- ``language`` kwarg accepted for API compat (currently a no-op)
+- Lock serialization keeps two threads from interleaving
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from hermes_chat_recorder.transcriber import Transcriber, TranscriberError
 
 
-@dataclass
-class _Seg:
-    text: str
-
-
-class _FakeModel:
-    def __init__(self, segments: list[_Seg], delay: float = 0.0) -> None:
-        self.segments = segments
+class _FakeFn:
+    def __init__(self, response, delay: float = 0.0) -> None:
+        self.response = response
         self.delay = delay
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[str] = []
 
-    def transcribe(self, audio: str, **kwargs):
-        self.calls.append((audio, dict(kwargs)))
+    def __call__(self, path: str) -> dict:
+        self.calls.append(path)
         if self.delay:
             time.sleep(self.delay)
-        # faster-whisper returns (iterator, info)
-        info = object()
-        return iter(self.segments), info
-
-
-class _FakeRaisingModel:
-    def transcribe(self, audio: str, **kwargs):
-        raise RuntimeError("synthetic failure")
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
 
 
 # ---------------------------------------------------------------------------
@@ -50,51 +44,39 @@ class _FakeRaisingModel:
 # ---------------------------------------------------------------------------
 
 
-def test_concatenates_segments_with_single_spaces() -> None:
-    fake = _FakeModel(
-        [_Seg(text=" hello "), _Seg(text="world  "), _Seg(text="  again")]
-    )
-    t = Transcriber(model=fake)
-    assert t.transcribe("/tmp/audio.ogg") == "hello world again"
+def test_returns_transcript_text_on_success() -> None:
+    fn = _FakeFn({"success": True, "transcript": "hello world"})
+    t = Transcriber(transcribe_fn=fn)
+    assert t.transcribe("/tmp/audio.ogg") == "hello world"
+    assert fn.calls == ["/tmp/audio.ogg"]
 
 
-def test_skips_blank_segments() -> None:
-    fake = _FakeModel([_Seg(text=""), _Seg(text="  "), _Seg(text="real content")])
-    t = Transcriber(model=fake)
-    assert t.transcribe("/tmp/audio.ogg") == "real content"
+def test_strips_whitespace_from_transcript() -> None:
+    fn = _FakeFn({"success": True, "transcript": "  trim me  "})
+    t = Transcriber(transcribe_fn=fn)
+    assert t.transcribe("/tmp/audio.ogg") == "trim me"
 
 
-def test_empty_segment_list_returns_empty_string() -> None:
-    t = Transcriber(model=_FakeModel([]))
-    assert t.transcribe("/tmp/empty.ogg") == ""
-
-
-def test_path_is_passed_as_string_to_model() -> None:
-    fake = _FakeModel([_Seg(text="ok")])
-    t = Transcriber(model=fake)
-    from pathlib import Path
-
+def test_path_object_is_passed_as_string() -> None:
+    fn = _FakeFn({"success": True, "transcript": "ok"})
+    t = Transcriber(transcribe_fn=fn)
     t.transcribe(Path("/tmp/x.ogg"))
-    assert fake.calls[0][0] == "/tmp/x.ogg"
+    assert fn.calls[0] == "/tmp/x.ogg"
 
 
-def test_language_kwarg_is_forwarded_when_set() -> None:
-    fake = _FakeModel([_Seg(text="ok")])
-    t = Transcriber(model=fake)
-    t.transcribe("/tmp/x.ogg", language="en")
-    assert fake.calls[0][1].get("language") == "en"
+def test_language_kwarg_is_accepted_for_compat() -> None:
+    """`language` is accepted for API compatibility but currently ignored.
+    The Hermes STT entrypoint doesn't take a language hint; we just
+    need the kwarg to not crash."""
+    fn = _FakeFn({"success": True, "transcript": "ok"})
+    t = Transcriber(transcribe_fn=fn)
+    assert t.transcribe("/tmp/x.ogg", language="en") == "ok"
 
 
-def test_language_defaults_to_none() -> None:
-    fake = _FakeModel([_Seg(text="ok")])
-    t = Transcriber(model=fake)
-    t.transcribe("/tmp/x.ogg")
-    assert fake.calls[0][1].get("language") is None
-
-
-def test_model_size_property_is_recorded() -> None:
-    t = Transcriber(model=_FakeModel([]), model_size="small")
-    assert t.model_size == "small"
+def test_empty_transcript_returns_empty_string() -> None:
+    fn = _FakeFn({"success": True, "transcript": ""})
+    t = Transcriber(transcribe_fn=fn)
+    assert t.transcribe("/tmp/x.ogg") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -102,12 +84,34 @@ def test_model_size_property_is_recorded() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_model_exception_becomes_transcriber_error() -> None:
-    t = Transcriber(model=_FakeRaisingModel())
+def test_success_false_raises_with_upstream_error() -> None:
+    fn = _FakeFn({"success": False, "transcript": "", "error": "stt provider down"})
+    t = Transcriber(transcribe_fn=fn)
+    with pytest.raises(TranscriberError, match="stt provider down"):
+        t.transcribe("/tmp/x.ogg")
+
+
+def test_success_false_without_error_uses_default_message() -> None:
+    fn = _FakeFn({"success": False, "transcript": ""})
+    t = Transcriber(transcribe_fn=fn)
+    with pytest.raises(TranscriberError, match="no detail"):
+        t.transcribe("/tmp/x.ogg")
+
+
+def test_underlying_exception_wraps_to_transcriber_error() -> None:
+    fn = _FakeFn(RuntimeError("synthetic failure"))
+    t = Transcriber(transcribe_fn=fn)
     with pytest.raises(TranscriberError) as ei:
         t.transcribe("/tmp/x.ogg")
     assert "/tmp/x.ogg" in str(ei.value)
     assert isinstance(ei.value.__cause__, RuntimeError)
+
+
+def test_non_dict_return_raises() -> None:
+    fn = _FakeFn("not a dict")  # type: ignore[arg-type]
+    t = Transcriber(transcribe_fn=fn)
+    with pytest.raises(TranscriberError, match="unexpected transcribe_audio return"):
+        t.transcribe("/tmp/x.ogg")
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +121,10 @@ def test_model_exception_becomes_transcriber_error() -> None:
 
 def test_lock_serializes_concurrent_callers() -> None:
     """Two threads calling transcribe() must NOT interleave inside the
-    model. The fake records call entries; we sleep inside the model to
-    create an interleave window the lock has to prevent."""
-    fake = _FakeModel([_Seg(text="x")], delay=0.05)
-    t = Transcriber(model=fake)
+    underlying function. We sleep inside the fake to create an
+    interleave window the lock has to prevent."""
+    fn = _FakeFn({"success": True, "transcript": "x"}, delay=0.05)
+    t = Transcriber(transcribe_fn=fn)
 
     finished_in_order: list[str] = []
 
@@ -134,7 +138,5 @@ def test_lock_serializes_concurrent_callers() -> None:
     for th in threads:
         th.join()
 
-    # All three got through.
     assert sorted(finished_in_order) == sorted(["a0", "a1", "a2"])
-    # And model.calls reflects all three call entries in some order.
-    assert len(fake.calls) == 3
+    assert len(fn.calls) == 3

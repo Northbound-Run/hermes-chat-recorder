@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hermes_chat_recorder.config import ConfigError, load_config
+from hermes_chat_recorder.name_resolver import mxid_localpart
 from hermes_chat_recorder.recorder import Recorder
 from hermes_chat_recorder.writer import VaultWriter
 
@@ -66,14 +67,9 @@ def register(ctx: Any) -> Recorder | None:
         "on_session_start", lambda **kw: _wire_matrix_adapter(recorder, **kw)
     )
 
-    if config.prewarm_whisper:
-        _kick_prewarm(recorder)
-
     logger.info(
-        "hermes_chat_recorder: registered (vault_root=%s, prewarm=%s, openrouter=%s)",
+        "hermes_chat_recorder: registered (vault_root=%s) — STT and vision delegated to Hermes",
         config.vault_root,
-        config.prewarm_whisper,
-        bool(config.openrouter_api_key),
     )
     return recorder
 
@@ -91,7 +87,7 @@ def _assert_hooks_available() -> None:
     """
     try:
         from hermes_cli.plugins import VALID_HOOKS  # type: ignore[import-not-found]
-    except Exception:  # noqa: BLE001 - import optional
+    except Exception:
         logger.debug(
             "hermes_chat_recorder: VALID_HOOKS unavailable (probably running outside Hermes); "
             "skipping hook-name assertion."
@@ -107,30 +103,6 @@ def _assert_hooks_available() -> None:
         )
 
 
-def _kick_prewarm(recorder: Recorder) -> None:
-    """Spawn a daemon thread that loads the Whisper model so the first
-    voice note doesn't pay the ~10s model-load cost in the hot hook path.
-
-    Best-effort: any failure inside the prewarm thread is logged and
-    swallowed — we don't want plugin registration to fail just because
-    the model couldn't load. The lazy path inside
-    ``Recorder._get_transcriber`` will retry on first use.
-    """
-    import threading
-
-    def _go() -> None:
-        try:
-            recorder._get_transcriber()  # noqa: SLF001 - explicit prewarm hook
-            logger.info("hermes_chat_recorder: whisper prewarm complete")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("hermes_chat_recorder: whisper prewarm failed: %s", exc)
-
-    t = threading.Thread(
-        target=_go, name="hcr-whisper-prewarm", daemon=True
-    )
-    t.start()
-
-
 def _read_plugin_block(ctx: Any) -> dict | None:
     """Extract the ``plugins.chat_recorder`` block from Hermes's config.
 
@@ -142,14 +114,16 @@ def _read_plugin_block(ctx: Any) -> dict | None:
     """
     # Hermes's canonical path.
     try:
-        from hermes_cli.config import load_config as _load_hermes_config  # type: ignore[import-not-found]
         from hermes_cli.config import cfg_get  # type: ignore[import-not-found]
+        from hermes_cli.config import (
+            load_config as _load_hermes_config,  # type: ignore[import-not-found]
+        )
 
         all_config = _load_hermes_config()
         block = cfg_get(all_config, "plugins", "chat_recorder", default=None)
         if isinstance(block, dict):
             return block
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug(
             "hermes_chat_recorder: hermes_cli.config unavailable (%s); "
             "falling back to ctx.config lookup.",
@@ -207,6 +181,8 @@ def _wire_matrix_adapter(recorder: Recorder, **kwargs: Any) -> None:
     if download is not None:
         recorder.set_download_media(download)
 
+    _wire_name_resolver(recorder, adapter)
+
     _wrap_send(adapter, recorder)
 
 
@@ -235,6 +211,120 @@ def _read_bot_mxid(adapter: Any) -> str:
             if isinstance(val, str) and val:
                 return val
     return ""
+
+
+def _wire_name_resolver(recorder: Recorder, adapter: Any) -> None:
+    """Bind the resolver's lookups to the live Matrix client.
+
+    Falls back gracefully when the client is missing or its method
+    surface doesn't match mautrix conventions — the resolver already
+    has filesystem-slug and MXID-localpart fallbacks, so a wiring
+    failure just means we keep using those.
+    """
+    client = getattr(adapter, "client", None)
+    if client is None:
+        logger.info(
+            "hermes_chat_recorder: matrix adapter exposes no .client; "
+            "names will fall back to MXIDs and room-ID slugs."
+        )
+        return
+
+    import inspect
+
+    def _run(maybe_awaitable: Any) -> Any:
+        if inspect.isawaitable(maybe_awaitable):
+            from hermes_chat_recorder._background_loop import get_background_loop
+
+            return get_background_loop().run_coro_sync(maybe_awaitable)
+        return maybe_awaitable
+
+    def _room_name(room_id: str) -> str | None:
+        # m.room.name first.
+        getter = getattr(client, "get_state_event", None)
+        if callable(getter):
+            try:
+                content = _run(getter(room_id, "m.room.name"))
+            except Exception:
+                content = None
+            name = _extract_name_field(content, "name")
+            if name:
+                return name
+            # Canonical alias as a softer fallback.
+            try:
+                content = _run(getter(room_id, "m.room.canonical_alias"))
+            except Exception:
+                content = None
+            alias = _extract_name_field(content, "alias")
+            if alias:
+                # "#room:server" → "room"
+                trimmed = alias.lstrip("#")
+                return trimmed.split(":", 1)[0] if ":" in trimmed else trimmed
+        return None
+
+    def _user_name(mxid: str) -> str | None:
+        getter = getattr(client, "get_displayname", None)
+        if not callable(getter):
+            return None
+        try:
+            result = _run(getter(mxid))
+        except Exception:
+            return None
+        if isinstance(result, str) and result.strip():
+            return result.strip()
+        if isinstance(result, dict):
+            name = result.get("displayname")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        return None
+
+    def _dm_peer(room_id: str) -> str | None:
+        getter = getattr(client, "get_joined_members", None) or getattr(
+            client, "get_room_members", None
+        )
+        if not callable(getter):
+            return None
+        try:
+            members = _run(getter(room_id))
+        except Exception:
+            return None
+        if not isinstance(members, dict):
+            return None
+        bot = recorder.bot_mxid
+        for member_mxid, info in members.items():
+            if member_mxid == bot:
+                continue
+            display = getattr(info, "displayname", None) or getattr(
+                info, "display_name", None
+            )
+            if display is None and isinstance(info, dict):
+                display = info.get("displayname") or info.get("display_name")
+            if isinstance(display, str) and display.strip():
+                return display.strip()
+            # Last-resort: localpart of the peer's MXID so we still get
+            # SOMETHING readable for the room slug.
+            local = mxid_localpart(str(member_mxid))
+            if local:
+                return local
+        return None
+
+    recorder.resolver.set_lookups(
+        room_name_lookup=_room_name,
+        user_name_lookup=_user_name,
+        dm_peer_lookup=_dm_peer,
+    )
+    logger.info("hermes_chat_recorder: name resolver wired to live Matrix client")
+
+
+def _extract_name_field(content: Any, field: str) -> str | None:
+    """Pull ``field`` off a mautrix state-event content (typed obj or dict)."""
+    if content is None:
+        return None
+    val = getattr(content, field, None)
+    if val is None and isinstance(content, dict):
+        val = content.get(field)
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
 
 
 def _resolve_download_callable(adapter: Any):
@@ -362,5 +452,5 @@ def _record_outbound(
             event_id=event_id,
             timestamp=datetime.now(timezone.utc),
         )
-    except Exception as exc:  # noqa: BLE001 - never let vault failure break send
+    except Exception as exc:
         logger.warning("hermes_chat_recorder: record_outbound failed: %s", exc)

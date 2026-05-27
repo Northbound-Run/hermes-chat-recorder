@@ -318,60 +318,100 @@ class _AsyncDownloadAdapter:
         return b"AUDIO_FROM_ASYNC"
 
 
-def test_prewarm_whisper_kicks_background_thread(tmp_path: Path, monkeypatch) -> None:
-    """When prewarm_whisper=True, register() must spawn a daemon
-    thread that calls _get_transcriber so the first voice note doesn't
-    pay the model-load cost in the hot hook path.
+# ---------------------------------------------------------------------------
+# Name resolver wiring at on_session_start
+# ---------------------------------------------------------------------------
 
-    We patch Recorder._get_transcriber to a sentinel that records it
-    was called, so the test doesn't actually load real faster-whisper.
+
+class _FakeNameClient:
+    """Mautrix-shaped client surface used by _wire_name_resolver.
+
+    Mixes sync and async methods to exercise both code paths in the
+    background-loop bridge.
     """
-    import threading
 
-    from hermes_chat_recorder.recorder import Recorder
+    def __init__(self) -> None:
+        self.room_names = {"!room1:srv": "Matt & Annika"}
+        self.displaynames = {"@matt:srv": "Matt Hall", "@ralph:srv": "Ralph"}
+        # Members per room: room_id -> {mxid: {"displayname": str}}
+        self.members = {
+            "!dmroom:srv": {
+                "@ralph:srv": {"displayname": "Ralph"},
+                "@matt:srv": {"displayname": "Matt Hall"},
+            }
+        }
 
-    called = threading.Event()
-
-    def _fake_get_transcriber(self):
-        called.set()
+    async def get_state_event(self, room_id: str, event_type: str, state_key: str = ""):
+        if event_type == "m.room.name":
+            name = self.room_names.get(room_id)
+            return {"name": name} if name else None
         return None
 
-    monkeypatch.setattr(Recorder, "_get_transcriber", _fake_get_transcriber)
+    async def get_displayname(self, mxid: str):
+        return self.displaynames.get(mxid)
 
-    hooks: list = []
-    ctx = _build_ctx(
-        {"vault_root": str(tmp_path), "prewarm_whisper": True}, hooks
-    )
-    register(ctx)
-
-    # The prewarm runs on a background daemon thread — give it a
-    # moment to call our patched method.
-    assert called.wait(timeout=2.0), "prewarm thread never invoked _get_transcriber"
+    async def get_joined_members(self, room_id: str):
+        return self.members.get(room_id, {})
 
 
-def test_prewarm_whisper_off_by_default_no_thread(tmp_path: Path, monkeypatch) -> None:
-    """The default prewarm_whisper=False must NOT trigger model load
-    at register() time — otherwise hermes-ceo boot time depends on
-    the model cache being warm."""
-    import threading
-
-    from hermes_chat_recorder.recorder import Recorder
-
-    called = threading.Event()
-
-    def _fake_get_transcriber(self):
-        called.set()
-        return None
-
-    monkeypatch.setattr(Recorder, "_get_transcriber", _fake_get_transcriber)
-
+def test_name_resolver_wires_pretty_room_and_user_names(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
-    register(ctx)
+    recorder = register(ctx)
+    assert recorder is not None
+    on_start = next(cb for name, cb in hooks if name == "on_session_start")
 
-    # If a thread spawns, it'd fire within ~1s. Wait briefly and
-    # confirm nothing happened.
-    assert not called.wait(timeout=0.3), "prewarm fired even though prewarm_whisper=False"
+    client = _FakeNameClient()
+    adapter = SimpleNamespace(
+        user_id="@ralph:srv",
+        client=client,
+        send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
+    )
+    on_start(gateway=_build_gateway(adapter))
+
+    assert recorder.resolver.room_slug("!room1:srv") == "Matt-and-Annika"
+    assert recorder.resolver.user_display("@matt:srv") == "Matt Hall"
+
+
+def test_name_resolver_falls_back_to_dm_peer_when_room_name_missing(
+    tmp_path: Path,
+) -> None:
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    recorder = register(ctx)
+    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+
+    client = _FakeNameClient()
+    adapter = SimpleNamespace(
+        user_id="@ralph:srv",
+        client=client,
+        send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
+    )
+    on_start(gateway=_build_gateway(adapter))
+
+    # !dmroom:srv has no m.room.name; resolver should pick the peer's
+    # display name (skipping the bot itself).
+    assert recorder.resolver.room_slug("!dmroom:srv") == "Matt-Hall"
+
+
+def test_name_resolver_safe_when_adapter_has_no_client(tmp_path: Path) -> None:
+    """No client → resolver keeps its default fallbacks (slug-from-id,
+    MXID localpart). No exception."""
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    recorder = register(ctx)
+    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+
+    adapter = SimpleNamespace(
+        user_id="@ralph:srv",
+        send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
+    )
+    on_start(gateway=_build_gateway(adapter))
+
+    # Falls back to slug-from-room-id.
+    assert recorder.resolver.room_slug("!abc:srv") == "abc"
+    # Falls back to MXID localpart.
+    assert recorder.resolver.user_display("@matt:srv") == "matt"
 
 
 def test_async_download_callable_works_from_inside_running_loop(tmp_path: Path) -> None:

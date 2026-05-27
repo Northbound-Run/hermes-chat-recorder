@@ -18,6 +18,7 @@ import pytest
 
 from hermes_chat_recorder.config import RecorderConfig
 from hermes_chat_recorder.describer import ImageDescriberError
+from hermes_chat_recorder.name_resolver import NameResolver
 from hermes_chat_recorder.recorder import Recorder
 from hermes_chat_recorder.transcriber import TranscriberError
 from hermes_chat_recorder.types import DescribeResult
@@ -106,18 +107,18 @@ def _build_recorder(
     transcriber: Any = None,
     describer: Any = None,
     download_media: Any = None,
-    openrouter_api_key: str = "",
     record_outbound: bool = True,
+    resolver: NameResolver | None = None,
 ) -> Recorder:
     cfg = RecorderConfig(
         vault_root=tmp_path,
-        openrouter_api_key=openrouter_api_key,
         record_outbound=record_outbound,
     )
     writer = VaultWriter(vault_root=tmp_path, timezone="UTC")
     return Recorder(
         config=cfg,
         writer=writer,
+        resolver=resolver,
         transcriber=transcriber,
         describer=describer,
         bot_mxid=bot_mxid,
@@ -270,7 +271,6 @@ def test_image_described_rewrites_with_caption_and_description(tmp_path: Path) -
         tmp_path,
         describer=desc,
         download_media=lambda m: b"\x89PNG",
-        openrouter_api_key="sk-or-x",
     )
     event = _event(kind="IMAGE", text="check this out", raw=_image_raw())
     result = r.on_pre_gateway_dispatch(event=event)
@@ -284,29 +284,12 @@ def test_image_described_rewrites_with_caption_and_description(tmp_path: Path) -
     assert "stage:described" in content
 
 
-def test_image_without_describer_writes_failed_section_with_caption_fallback(
-    tmp_path: Path,
-) -> None:
-    r = _build_recorder(
-        tmp_path, describer=None, download_media=lambda m: b"\x89PNG", openrouter_api_key=""
-    )
-    event = _event(kind="IMAGE", text="here's the doodle", raw=_image_raw())
-    result = r.on_pre_gateway_dispatch(event=event)
-    assert result is not None
-    # Caption preserved in the rewrite fallback so the agent has context.
-    assert "here's the doodle" in result["text"]
-
-    content = next(tmp_path.rglob("*.md")).read_text()
-    assert "stage:describe_failed" in content
-
-
 def test_image_describer_failure_falls_back_to_caption(tmp_path: Path) -> None:
-    desc = _FakeDescriber(raise_exc=ImageDescriberError("openrouter 503"))
+    desc = _FakeDescriber(raise_exc=ImageDescriberError("vision provider down"))
     r = _build_recorder(
         tmp_path,
         describer=desc,
         download_media=lambda m: b"\x89PNG",
-        openrouter_api_key="sk-or-x",
     )
     event = _event(kind="IMAGE", text="check this", raw=_image_raw())
     result = r.on_pre_gateway_dispatch(event=event)
@@ -314,7 +297,7 @@ def test_image_describer_failure_falls_back_to_caption(tmp_path: Path) -> None:
     assert result["text"].startswith("check this")
     content = next(tmp_path.rglob("*.md")).read_text()
     assert "stage:describe_failed" in content
-    assert "openrouter 503" in content
+    assert "vision provider down" in content
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +377,86 @@ def test_set_bot_mxid_updates_outbound_display(tmp_path: Path) -> None:
     r = _build_recorder(tmp_path, bot_mxid="")
     r.set_bot_mxid("@new_bot:srv")
     assert r.bot_mxid == "@new_bot:srv"
+
+
+# ---------------------------------------------------------------------------
+# Name resolver integration — pretty folder + pretty section header
+# ---------------------------------------------------------------------------
+
+
+def test_pretty_room_folder_when_resolver_has_room_name(tmp_path: Path) -> None:
+    resolver = NameResolver(room_name_lookup=lambda _: "Matt & Annika")
+    r = _build_recorder(tmp_path, resolver=resolver)
+    r.on_pre_gateway_dispatch(event=_event(text="hello"))
+
+    folders = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert len(folders) == 1
+    assert folders[0].name == "Matt-and-Annika"
+
+
+def test_pretty_sender_in_section_header(tmp_path: Path) -> None:
+    resolver = NameResolver(
+        room_name_lookup=lambda _: "Matt & Annika",
+        user_name_lookup=lambda mxid: {ANNIKA: "Annika R.", BOT: "Ralph"}.get(mxid),
+    )
+    r = _build_recorder(tmp_path, resolver=resolver)
+    r.on_pre_gateway_dispatch(event=_event(text="hi", sender=ANNIKA))
+
+    content = next(tmp_path.rglob("*.md")).read_text()
+    assert "Annika R." in content
+    # The MXID must NOT appear in the section header line.
+    header_line = next(line for line in content.splitlines() if line.startswith("### "))
+    assert ANNIKA not in header_line
+
+
+def test_outbound_resolves_bot_display_name_via_resolver(tmp_path: Path) -> None:
+    resolver = NameResolver(
+        user_name_lookup=lambda mxid: "Ralph" if mxid == BOT else None,
+    )
+    r = _build_recorder(tmp_path, resolver=resolver)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    r.record_outbound(
+        room_id=ROOM,
+        sender_display=BOT,  # caller passed an MXID — recorder MUST upgrade
+        text="On it.",
+        event_id="$reply:srv",
+        timestamp=ts,
+    )
+    header_line = next(
+        line
+        for line in next(tmp_path.rglob("*.md")).read_text().splitlines()
+        if line.startswith("### ")
+    )
+    assert "Ralph" in header_line
+    assert BOT not in header_line
+
+
+def test_outbound_respects_explicit_friendly_sender(tmp_path: Path) -> None:
+    """When the caller passes a real display name, honor it (don't override
+    with the resolver). This keeps the API stable for tests / callers
+    that have already done the lookup themselves."""
+    resolver = NameResolver(user_name_lookup=lambda _: "Resolver Result")
+    r = _build_recorder(tmp_path, resolver=resolver)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    r.record_outbound(
+        room_id=ROOM,
+        sender_display="Caller Override",
+        text="hi",
+        event_id="$rep:srv",
+        timestamp=ts,
+    )
+    content = next(tmp_path.rglob("*.md")).read_text()
+    assert "Caller Override" in content
+    assert "Resolver Result" not in content
+
+
+def test_fallback_to_slug_from_room_id_when_resolver_blank(tmp_path: Path) -> None:
+    """With no lookups wired, the room folder reverts to the legacy
+    `room_slug_from_room_id` behavior."""
+    r = _build_recorder(tmp_path)  # default resolver, no lookups
+    r.on_pre_gateway_dispatch(event=_event(text="hi"))
+
+    folders = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert len(folders) == 1
+    # !testroom:srv → "testroom"
+    assert folders[0].name == "testroom"

@@ -1,8 +1,9 @@
 """Configuration loading and validation for the recorder.
 
 The Hermes config block lives under ``plugins.chat_recorder`` in
-``config.yaml``. Env vars override matching fields when set. See
-``docs/DESIGN.md §7`` for the full schema.
+``config.yaml``. Env vars override matching fields when set. STT and
+vision are now delegated to Hermes's built-in services — this package
+no longer carries model/provider/credential settings of its own.
 """
 
 from __future__ import annotations
@@ -21,20 +22,25 @@ class RecorderConfig:
     vault_root: Path = Path("/data/vault/transcripts")
     record_outbound: bool = True
     timezone: str = "America/Los_Angeles"
-    image_describer_model: str = "google/gemini-3-flash-preview"
-    whisper_model_size: str = "base"
-    pending_voice_ttl_seconds: int = 300
-    prewarm_whisper: bool = False
 
-    # Resolved at load time from env. Empty string == not set.
-    openrouter_api_key: str = ""
-
-    # Stored for diagnostics + the readiness check.
     raw_block: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 _TRUTHY = {"true", "1", "yes", "on", "y", "t"}
 _FALSY = {"false", "0", "no", "off", "n", "f", ""}
+
+# Fields the config block used to accept that we now delegate to
+# Hermes. We accept them silently (don't fail readiness on old configs
+# carried over from v0.2 and earlier) but they have no effect.
+_DEPRECATED_FIELDS = frozenset(
+    {
+        "image_describer_model",
+        "whisper_model_size",
+        "openrouter_api_key",
+        "prewarm_whisper",
+        "pending_voice_ttl_seconds",
+    }
+)
 
 
 def _coerce_bool(value: Any, *, default: bool, field_name: str) -> bool:
@@ -81,28 +87,24 @@ def load_config(
     ----------
     plugin_block:
         The ``plugins.chat_recorder`` mapping from Hermes's loaded
-        config. ``None`` is treated as an empty mapping — useful when
-        the user hasn't added a config block yet (the plugin will load
-        with defaults; vault_root is required so we'll raise if it's
-        unset AND no default applies).
+        config. ``None`` is treated as an empty mapping.
     env:
         Environment overrides. Defaults to ``os.environ`` when None.
         Listed override keys:
 
-        * ``OPENROUTER_API_KEY``
-        * ``IMAGE_DESCRIBER_MODEL``
-        * ``WHISPER_MODEL_SIZE``
-        * ``TRANSCRIPT_TZ``
+        * ``TRANSCRIPT_TZ`` — overrides ``timezone``.
 
     Raises
     ------
     ConfigError
-        If a required field has an invalid type, or ``vault_root`` is
-        absent and no default applies, or ``timezone`` is unparseable.
+        If a required field has an invalid type or ``vault_root`` /
+        ``timezone`` is unparseable.
     """
     block = plugin_block or {}
     if not isinstance(block, dict):
-        raise ConfigError(f"plugins.chat_recorder must be a mapping, got {type(block).__name__}")
+        raise ConfigError(
+            f"plugins.chat_recorder must be a mapping, got {type(block).__name__}"
+        )
 
     env_map = env if env is not None else dict(os.environ)
 
@@ -125,54 +127,15 @@ def load_config(
         _opt("record_outbound", True), default=True, field_name="record_outbound"
     )
 
-    # timezone: env override wins; raw value validated downstream by ZoneInfo
     tz = env_map.get("TRANSCRIPT_TZ") or str(_opt("timezone", "America/Los_Angeles"))
     if not tz:
         raise ConfigError("timezone cannot be empty")
-    # We do NOT validate via ZoneInfo here to keep the config layer
-    # pure-stdlib-agnostic. VaultWriter.__init__ raises if the zone is
-    # unknown — that's the loud-fail-on-startup path.
 
-    image_describer_model = (
-        env_map.get("IMAGE_DESCRIBER_MODEL")
-        or str(_opt("image_describer_model", "google/gemini-3-flash-preview"))
-    )
-
-    whisper_model_size = (
-        env_map.get("WHISPER_MODEL_SIZE")
-        or str(_opt("whisper_model_size", "base"))
-    )
-
-    prewarm_whisper = _coerce_bool(
-        _opt("prewarm_whisper", False),
-        default=False,
-        field_name="prewarm_whisper",
-    )
-
-    pending_voice_ttl_seconds_raw = _opt("pending_voice_ttl_seconds", 300)
-    try:
-        pending_voice_ttl_seconds = int(pending_voice_ttl_seconds_raw)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(
-            f"pending_voice_ttl_seconds must be an integer, got {pending_voice_ttl_seconds_raw!r}"
-        ) from exc
-    if pending_voice_ttl_seconds < 0:
-        raise ConfigError("pending_voice_ttl_seconds must be non-negative")
-
-    openrouter_api_key = env_map.get("OPENROUTER_API_KEY", "") or ""
-
-    # NOTE: ``record_image_bytes`` and ``record_audio_bytes`` were in
-    # earlier drafts but are not implemented in v0.0.1 — they'd write
-    # original media binaries alongside transcripts. To avoid silently
-    # accepting config that does nothing, we EXPLICITLY reject them
-    # here so users see the gap immediately rather than wondering why
-    # their flag didn't take effect.
     for unsupported in ("record_image_bytes", "record_audio_bytes"):
         if unsupported in block:
             raise ConfigError(
-                f"{unsupported} is not yet implemented in this version of "
-                "hermes-chat-recorder; remove it from your config until v0.1.0 "
-                "lands the media-byte-preservation feature."
+                f"{unsupported} is not implemented in this version of "
+                "hermes-chat-recorder; remove it from your config."
             )
 
     return RecorderConfig(
@@ -180,10 +143,5 @@ def load_config(
         vault_root=vault_root,
         record_outbound=record_outbound,
         timezone=tz,
-        image_describer_model=image_describer_model,
-        whisper_model_size=whisper_model_size,
-        pending_voice_ttl_seconds=pending_voice_ttl_seconds,
-        prewarm_whisper=prewarm_whisper,
-        openrouter_api_key=openrouter_api_key,
         raw_block=block,
     )

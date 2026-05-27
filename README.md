@@ -12,14 +12,27 @@ Obsidian-style markdown vault.
 | Inbound | Behaviour |
 |---|---|
 | Text | Append the message to `vault_root/<room>/<YYYY-MM-DD>.md`. Pass through unmodified — Hermes's normal wake settings decide whether the agent replies. |
-| Voice note | Transcribe via local `faster-whisper`. Append placeholder + transcript section. Rewrite `event.text` to the transcript so the agent has usable content if it wakes. |
-| Image | Describe via OpenRouter vision. Append placeholder + description section. Rewrite `event.text` to caption + description + OCR'd text. |
+| Voice note | Transcribe via Hermes's built-in STT (`tools.transcription_tools.transcribe_audio`). Append placeholder + transcript section. Rewrite `event.text` to the transcript so the agent has usable content if it wakes. |
+| Image | Describe via Hermes's built-in vision (`tools.vision_tools.vision_analyze_tool`). Append placeholder + description section. Rewrite `event.text` to caption + description + OCR'd text. |
 | Reaction | Ignored (not recorded as a message section). |
 | Outbound (the agent's own reply) | Recorded with a `reply_to:` link back to the trigger. |
 
 This plugin is **recording-only**. It does NOT decide whether the agent
 wakes up — use Hermes's native `MATRIX_REQUIRE_MENTION` /
 `MATRIX_ALLOWED_USERS` settings for that.
+
+**Pretty names.** Folder names use the room's `m.room.name` (or the DM
+peer's display name for unnamed DMs), sanitized to filesystem-safe
+slugs (e.g. `Matt-and-Annika/`). Section headers use the sender's
+Matrix profile display name (with MXID-localpart fallback). All
+resolutions are cached for the process lifetime; restart the gateway
+to pick up a renamed room or profile.
+
+**No third-party deps.** STT and vision are delegated to Hermes's
+built-in tools. Whatever provider Hermes is configured for — local
+faster-whisper, Groq, OpenAI, Mistral, xAI for STT; the main LLM or
+the auxiliary vision provider for images — is what the recorder uses.
+This package's only runtime requirement is Hermes itself.
 
 ## Install
 
@@ -52,21 +65,25 @@ plugins:
     vault_root: /data/vault/transcripts
     record_outbound: true
     timezone: America/Los_Angeles
-    image_describer_model: google/gemini-3-flash-preview
-    whisper_model_size: base
-    prewarm_whisper: false
 ```
 
-Required env vars:
+STT and vision are configured **at the Hermes top level**, not here:
 
-- `OPENROUTER_API_KEY` — only needed if you want image description.
-  Plugin degrades gracefully (records `(describer unavailable)`) if absent.
+```yaml
+stt:
+  enabled: true
+  provider: "local"   # or "groq" / "openai" / "mistral" / "xai"
+  local:
+    model: "base"
+
+auxiliary:
+  vision:
+    provider: "main"  # use the main LLM, or override per Hermes docs
+    model: ""
+```
 
 Optional env vars:
 
-- `IMAGE_DESCRIBER_MODEL` — overrides `image_describer_model` config.
-- `WHISPER_MODEL_SIZE` — overrides `whisper_model_size` (e.g. `tiny`,
-  `base`, `small`, `medium`).
 - `TRANSCRIPT_TZ` — overrides `timezone`.
 
 ## Markdown vault format
@@ -102,8 +119,8 @@ its stage in-place or no-ops if already at a terminal stage.
 
 A single Hermes plugin registers two integrations: (1) the
 `pre_gateway_dispatch` hook for inbound messages, where it writes to
-the vault, transcribes voice via local `faster-whisper`, describes
-images via OpenRouter, and rewrites `event.text` to the
+the vault, delegates voice transcription to Hermes's STT and image
+description to Hermes's vision, and rewrites `event.text` to the
 transcript/description; (2) a wrapped `send` on the live Matrix
 adapter to capture outbound replies. Failure policy: per-event errors
 are logged and written as `*_failed` stage sections;

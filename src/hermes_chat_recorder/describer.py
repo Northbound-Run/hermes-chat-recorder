@@ -1,31 +1,36 @@
-"""Image description via OpenRouter's multimodal chat completions.
+"""Image description via Hermes's built-in vision service.
 
-Sync HTTPS, base64-encoded image payload, two-section prompt asking
-for a freeform DESCRIPTION and an OCR'd TEXT block. Mirrors the
-TypeScript implementation at
-``~/Git/northbound-os/src/mastra/channels/transcript/image-describer.ts``
-in protocol — the parse function accepts the same prompt shape.
+Delegates to ``tools.vision_tools.vision_analyze_tool``, which routes
+the request through Hermes's vision pipeline (whatever auxiliary
+provider Hermes is configured for — main LLM with vision, OpenRouter
+Gemini, etc.). This package no longer carries an OpenRouter dep or
+manages an API key directly.
 
-Per ``docs/DESIGN.md §4`` and ``§6`` we keep DESCRIPTION and TEXT
-separate at the dataclass level so the wake gate can use TEXT only
-(model-generated DESCRIPTION must never be allowed to false-wake the
-agent).
+Hermes's vision tool is async; we bridge to sync via the existing
+background-loop singleton in :mod:`_background_loop` so the recorder
+(a sync hook) can call us transparently.
+
+We keep the two-section DESCRIPTION / TEXT prompt that the previous
+implementation used: the recorder needs OCR'd text separated from
+freeform description so the section it writes to the vault stays
+human-readable and structured.
 """
 
 from __future__ import annotations
 
-import base64
+import inspect
+import json
 import logging
-from typing import Any, Protocol
+import os
+import tempfile
+from collections.abc import Callable
+from typing import Any
 
 from hermes_chat_recorder.types import DescribeResult
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "google/gemini-3-flash-preview"
-DEFAULT_TIMEOUT_SEC = 120.0
 DEFAULT_PROMPT = """You will receive an image. Produce TWO sections.
 
 DESCRIPTION:
@@ -35,110 +40,135 @@ TEXT:
 Transcribe any literal text visible in the image, preserving line breaks. If no text appears in the image, write "(none)"."""
 
 
-class HttpResponse(Protocol):
-    """Minimal response surface — what we need from httpx.Response."""
-
-    @property
-    def status_code(self) -> int: ...
-    def json(self) -> Any: ...
-    @property
-    def text(self) -> str: ...
-    def raise_for_status(self) -> None: ...
-
-
-class HttpClient(Protocol):
-    """Minimal client surface — what we need from httpx.Client."""
-
-    def post(
-        self, url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float | None = ...
-    ) -> HttpResponse: ...
+# Signature: (image_path_or_url: str, user_prompt: str) -> JSON string or awaitable
+VisionFn = Callable[[str, str], Any]
 
 
 class ImageDescriberError(Exception):
     """Raised when describing fails terminally.
 
-    Per ``docs/DESIGN.md §6``, callers catch this and mark the section
-    ``stage:describe_failed``. Don't let it propagate to the gateway
-    dispatch loop.
+    Callers catch this and mark the section ``stage:describe_failed``.
+    Don't let it propagate to the gateway dispatch loop.
     """
 
 
+def _default_vision_fn(image_path_or_url: str, user_prompt: str):
+    """Lazy import of Hermes's vision entrypoint.
+
+    Imported inside the function so the package can be loaded outside
+    Hermes (tests pass a fake and never trigger this).
+    """
+    from tools.vision_tools import vision_analyze_tool  # type: ignore[import-not-found]
+
+    return vision_analyze_tool(image_path_or_url, user_prompt)
+
+
 class ImageDescriber:
-    """Describe an image via OpenRouter, return parsed DESCRIPTION + TEXT."""
+    """Describe an image via Hermes vision, return parsed DESCRIPTION + TEXT."""
 
     def __init__(
         self,
         *,
-        api_key: str,
-        model: str = DEFAULT_MODEL,
-        base_url: str = DEFAULT_BASE_URL,
         prompt: str = DEFAULT_PROMPT,
-        timeout_sec: float = DEFAULT_TIMEOUT_SEC,
-        http: HttpClient | None = None,
+        vision_fn: VisionFn | None = None,
+        run_async: Callable[[Any], Any] | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._model = model
-        self._base_url = base_url.rstrip("/")
-        self._prompt = prompt
-        self._timeout_sec = timeout_sec
-        if http is not None:
-            self._http: HttpClient = http
-        else:
-            import httpx
+        """Construct.
 
-            self._http = httpx.Client(timeout=timeout_sec)
+        Pass ``vision_fn`` to inject a fake in tests. Pass ``run_async``
+        to override the sync↔async bridge (defaults to the background
+        loop singleton in :mod:`_background_loop`). Production code
+        should let both default.
+        """
+        self._prompt = prompt
+        self._vision_fn: VisionFn = vision_fn or _default_vision_fn
+        self._run_async = run_async
 
     def describe(self, image_bytes: bytes, *, mime: str = "image/png") -> DescribeResult:
-        """Describe an image. Returns parsed sections; raises on failure."""
+        """Describe an image. Returns parsed sections; raises on failure.
+
+        Hermes's vision tool takes either a URL or a local file path.
+        We spill the bytes to a tempfile so we can pass a path
+        regardless of whether the homeserver gave us encrypted or
+        plaintext media.
+        """
         if not image_bytes:
             raise ImageDescriberError("empty image bytes")
 
-        data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": self._prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-
+        ext = _ext_for_mime(mime)
+        fd, path = tempfile.mkstemp(suffix=ext)
         try:
-            resp = self._http.post(
-                f"{self._base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=self._timeout_sec,
-            )
-        except Exception as exc:  # noqa: BLE001 - wrap transport errors uniformly
-            raise ImageDescriberError(f"openrouter transport error: {exc}") from exc
+            with os.fdopen(fd, "wb") as f:
+                f.write(image_bytes)
 
-        if resp.status_code >= 400:
-            raise ImageDescriberError(
-                f"openrouter returned HTTP {resp.status_code}: {resp.text[:200]!r}"
-            )
+            try:
+                result = self._vision_fn(path, self._prompt)
+            except Exception as exc:
+                raise ImageDescriberError(f"hermes vision raised: {exc}") from exc
 
+            if inspect.isawaitable(result):
+                result = self._await(result)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+        return _parse_vision_response(result)
+
+    def _await(self, awaitable: Any) -> Any:
+        if self._run_async is not None:
+            return self._run_async(awaitable)
+        from hermes_chat_recorder._background_loop import get_background_loop
+
+        return get_background_loop().run_coro_sync(awaitable)
+
+
+def _ext_for_mime(mime: str) -> str:
+    m = (mime or "").lower()
+    if "jpeg" in m or "jpg" in m:
+        return ".jpg"
+    if "png" in m:
+        return ".png"
+    if "gif" in m:
+        return ".gif"
+    if "webp" in m:
+        return ".webp"
+    if "heic" in m or "heif" in m:
+        return ".heic"
+    return ".img"
+
+
+def _parse_vision_response(raw: Any) -> DescribeResult:
+    """Extract the analysis string from Hermes's vision response.
+
+    ``vision_analyze_tool`` returns a JSON string of the form
+    ``{"success": bool, "analysis": str}``. We tolerate both already-
+    parsed dicts and raw JSON strings so tests / future Hermes
+    refactors don't break us.
+    """
+    obj: Any = raw
+    if isinstance(raw, str):
         try:
-            body = resp.json()
-            raw_content = body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, ValueError) as exc:
-            raise ImageDescriberError(f"unexpected openrouter response shape: {exc}") from exc
-
-        if not isinstance(raw_content, str):
+            obj = json.loads(raw)
+        except json.JSONDecodeError as exc:
             raise ImageDescriberError(
-                f"expected string message content, got {type(raw_content).__name__}"
-            )
+                f"vision response not valid JSON: {raw[:200]!r}"
+            ) from exc
 
-        return parse_description(raw_content)
+    if not isinstance(obj, dict):
+        raise ImageDescriberError(
+            f"unexpected vision response shape: {type(obj).__name__}"
+        )
+
+    if not obj.get("success", False):
+        err = obj.get("analysis") or obj.get("error") or "vision failed"
+        raise ImageDescriberError(str(err))
+
+    analysis = obj.get("analysis", "")
+    if not isinstance(analysis, str):
+        analysis = str(analysis)
+    return parse_description(analysis)
 
 
 def parse_description(raw: str) -> DescribeResult:
@@ -154,18 +184,13 @@ def parse_description(raw: str) -> DescribeResult:
     raw = raw or ""
     lower = raw.lower()
 
-    def _find(label: str) -> int:
-        idx = lower.find(label)
-        return idx
-
-    desc_idx = _find("description:")
-    text_idx = _find("text:")
+    desc_idx = lower.find("description:")
+    text_idx = lower.find("text:")
 
     description = ""
     text = ""
 
     if desc_idx == -1 and text_idx == -1:
-        # No section headers — treat the whole blob as description.
         description = raw.strip()
         return DescribeResult(description=description, text="", raw=raw)
 
@@ -173,12 +198,12 @@ def parse_description(raw: str) -> DescribeResult:
         desc_start = desc_idx + len("description:")
         if text_idx != -1 and text_idx > desc_idx:
             description = raw[desc_start:text_idx].strip()
-            text = raw[text_idx + len("text:"):].strip()
+            text = raw[text_idx + len("text:") :].strip()
         else:
             description = raw[desc_start:].strip()
 
     if text_idx != -1 and desc_idx == -1:
-        text = raw[text_idx + len("text:"):].strip()
+        text = raw[text_idx + len("text:") :].strip()
 
     if text == "(none)":
         text = ""
