@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-chat-recorder"
-version = "0.0.1"
-description = "Record every Hermes Matrix chat message (text, voice, image) to an Obsidian-style vault, with wake gating by @-mention or nickname."
+version = "0.1.0"
+description = "Record every Hermes Matrix chat message (text, voice, image) to an Obsidian-style vault."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

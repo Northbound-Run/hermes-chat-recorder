@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hermes_chat_recorder.config import ConfigError, load_config
-from hermes_chat_recorder.gate import Gate
 from hermes_chat_recorder.recorder import Recorder
 from hermes_chat_recorder.writer import VaultWriter
 
@@ -45,11 +44,9 @@ def register(ctx: Any) -> Recorder | None:
         return None
 
     writer = VaultWriter(vault_root=config.vault_root, timezone=config.timezone)
-    gate = Gate(config.nicknames)
     recorder = Recorder(
         config=config,
         writer=writer,
-        gate=gate,
         # Transcriber and describer are constructed lazily on first use
         # so plugin load stays cheap even when faster-whisper is in the
         # venv but no audio has been processed yet.
@@ -73,10 +70,10 @@ def register(ctx: Any) -> Recorder | None:
         _kick_prewarm(recorder)
 
     logger.info(
-        "hermes_chat_recorder: registered (vault_root=%s, nicknames=%s, prewarm=%s)",
+        "hermes_chat_recorder: registered (vault_root=%s, prewarm=%s, openrouter=%s)",
         config.vault_root,
-        list(config.nicknames),
         config.prewarm_whisper,
+        bool(config.openrouter_api_key),
     )
     return recorder
 

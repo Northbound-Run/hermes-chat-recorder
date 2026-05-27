@@ -35,7 +35,7 @@ def _build_ctx(plugin_block: dict, hooks: list) -> Any:
 
 def test_register_returns_recorder_and_binds_two_hooks(tmp_path: Path) -> None:
     hooks: list = []
-    ctx = _build_ctx({"enabled": True, "vault_root": str(tmp_path), "nicknames": ["ralph"]}, hooks)
+    ctx = _build_ctx({"enabled": True, "vault_root": str(tmp_path)}, hooks)
 
     recorder = register(ctx)
     assert recorder is not None
@@ -127,7 +127,7 @@ def _build_gateway(adapter: Any) -> Any:
 
 def test_on_session_start_binds_bot_mxid_and_wraps_send(tmp_path: Path) -> None:
     hooks: list = []
-    ctx = _build_ctx({"vault_root": str(tmp_path), "nicknames": ["ralph"]}, hooks)
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
     assert recorder is not None
 

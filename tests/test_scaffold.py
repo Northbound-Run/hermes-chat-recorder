@@ -35,7 +35,6 @@ def test_register_callable_with_minimal_ctx(tmp_path) -> None:
                 "chat_recorder": {
                     "enabled": True,
                     "vault_root": str(tmp_path),
-                    "nicknames": ["ralph"],
                 }
             }
         },

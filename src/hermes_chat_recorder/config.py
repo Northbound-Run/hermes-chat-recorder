@@ -19,12 +19,10 @@ class RecorderConfig:
 
     enabled: bool = True
     vault_root: Path = Path("/data/vault/transcripts")
-    nicknames: tuple[str, ...] = ()
     record_outbound: bool = True
     timezone: str = "America/Los_Angeles"
     image_describer_model: str = "google/gemini-3-flash-preview"
     whisper_model_size: str = "base"
-    transcribe_failure_visible: bool = True
     pending_voice_ttl_seconds: int = 300
     prewarm_whisper: bool = False
 
@@ -123,15 +121,6 @@ def load_config(
     if not str(vault_root).strip():
         raise ConfigError("vault_root is required and cannot be empty")
 
-    nicknames_raw = _opt("nicknames", [])
-    if not isinstance(nicknames_raw, (list, tuple)):
-        raise ConfigError(
-            f"nicknames must be a list of strings, got {type(nicknames_raw).__name__}"
-        )
-    nicknames = tuple(
-        str(n).strip() for n in nicknames_raw if isinstance(n, str) and str(n).strip()
-    )
-
     record_outbound = _coerce_bool(
         _opt("record_outbound", True), default=True, field_name="record_outbound"
     )
@@ -152,12 +141,6 @@ def load_config(
     whisper_model_size = (
         env_map.get("WHISPER_MODEL_SIZE")
         or str(_opt("whisper_model_size", "base"))
-    )
-
-    transcribe_failure_visible = _coerce_bool(
-        _opt("transcribe_failure_visible", True),
-        default=True,
-        field_name="transcribe_failure_visible",
     )
 
     prewarm_whisper = _coerce_bool(
@@ -195,12 +178,10 @@ def load_config(
     return RecorderConfig(
         enabled=enabled,
         vault_root=vault_root,
-        nicknames=nicknames,
         record_outbound=record_outbound,
         timezone=tz,
         image_describer_model=image_describer_model,
         whisper_model_size=whisper_model_size,
-        transcribe_failure_visible=transcribe_failure_visible,
         pending_voice_ttl_seconds=pending_voice_ttl_seconds,
         prewarm_whisper=prewarm_whisper,
         openrouter_api_key=openrouter_api_key,

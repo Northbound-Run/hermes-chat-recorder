@@ -1,6 +1,6 @@
 name: chat_recorder
-version: 0.0.1
-description: "Record Hermes Matrix chat into a vault (text, voice, image), with optional wake gating by @-mention or configured nicknames."
+version: 0.1.0
+description: "Record every Hermes Matrix chat message into a vault (text, voice transcripts, image descriptions). Wake gating is owned by Hermes's native settings."
 author: Northbound
 license: MIT
 homepage: https://github.com/northbound-run/hermes-chat-recorder

@@ -1,19 +1,22 @@
-"""Recorder — orchestrates writer, gate, transcriber, describer.
+"""Recorder — orchestrates writer, transcriber, describer.
 
-The Recorder owns the per-process state (writer + gate + lazy-init'd
+The Recorder owns the per-process state (writer + lazy-init'd
 transcriber and describer) and provides the two callbacks Hermes binds
 into:
 
 * :meth:`Recorder.on_pre_gateway_dispatch` — sync callback wired to the
-  ``pre_gateway_dispatch`` plugin hook. Records every inbound Matrix
-  event to the vault and decides skip/rewrite/allow per the wake gate.
+  ``pre_gateway_dispatch`` plugin hook. **Records every inbound Matrix
+  message to the vault**. For voice/image events it transcribes /
+  describes the media and rewrites ``event.text`` so the agent has
+  usable content. It does NOT make wake decisions — whether the agent
+  replies is governed by Hermes's native settings (e.g.
+  ``MATRIX_REQUIRE_MENTION``).
 * :meth:`Recorder.on_session_start` — sync callback wired to
   ``on_session_start``. Locates the live Matrix adapter, captures a
   download-media handle, and wraps the adapter's ``send`` so outbound
   replies also land in the vault.
 
-See ``docs/DESIGN.md §2`` for the dispatch contract and ``§5`` for
-the Pattern A (sync blocking) concurrency model.
+See ``docs/DESIGN.md`` for the storage format and concurrency model.
 """
 
 from __future__ import annotations
@@ -24,14 +27,13 @@ from typing import Any
 
 from hermes_chat_recorder.config import RecorderConfig
 from hermes_chat_recorder.describer import ImageDescriber, ImageDescriberError
-from hermes_chat_recorder.gate import Gate
 from hermes_chat_recorder.matrix_event import (
     MatrixEventInfo,
     extract as extract_matrix_event,
     room_slug_from_room_id,
 )
 from hermes_chat_recorder.transcriber import Transcriber, TranscriberError
-from hermes_chat_recorder.types import GateInput, Section
+from hermes_chat_recorder.types import Section
 from hermes_chat_recorder.writer import VaultWriter
 
 logger = logging.getLogger(__name__)
@@ -44,14 +46,20 @@ DownloadMedia = Callable[[str], bytes]
 
 
 class Recorder:
-    """Wires every Matrix message through the vault writer and the wake gate."""
+    """Records every Matrix message to the vault.
+
+    The recorder is intentionally NOT a gate. It writes everything it
+    sees and lets Hermes's native settings decide whether the agent
+    wakes. For voice/image events it rewrites ``event.text`` to the
+    transcript / description so the agent has usable content if it does
+    wake.
+    """
 
     def __init__(
         self,
         *,
         config: RecorderConfig,
         writer: VaultWriter,
-        gate: Gate,
         transcriber: Transcriber | None = None,
         describer: ImageDescriber | None = None,
         bot_mxid: str = "",
@@ -59,7 +67,6 @@ class Recorder:
     ) -> None:
         self.config = config
         self.writer = writer
-        self.gate = gate
         self._transcriber = transcriber
         self._describer = describer
         self.bot_mxid = bot_mxid
@@ -85,7 +92,7 @@ class Recorder:
                 self._transcriber = Transcriber(model_size=self.config.whisper_model_size)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "transcript_recorder: failed to load faster-whisper '%s': %s",
+                    "hermes_chat_recorder: failed to load faster-whisper '%s': %s",
                     self.config.whisper_model_size,
                     exc,
                 )
@@ -102,7 +109,9 @@ class Recorder:
                     model=self.config.image_describer_model,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("transcript_recorder: failed to construct describer: %s", exc)
+                logger.warning(
+                    "hermes_chat_recorder: failed to construct describer: %s", exc
+                )
                 return None
         return self._describer
 
@@ -113,114 +122,76 @@ class Recorder:
     def on_pre_gateway_dispatch(
         self, *, event: Any, gateway: Any = None, session_store: Any = None
     ) -> dict | None:
-        """Hermes invokes this synchronously for every inbound message.
+        """Sync callback invoked by Hermes per inbound message.
 
         Returns:
-            * ``None`` — let the gateway dispatch the event normally.
-            * ``{"action": "skip", "reason": str}`` — drop the event;
-              the agent should NOT generate a reply.
+            * ``None`` — let the gateway dispatch normally (the default
+              for text events and for events we don't recognize).
             * ``{"action": "rewrite", "text": str}`` — replace
-              ``event.text`` before dispatch (used to substitute
-              transcripts / image descriptions for media events).
+              ``event.text`` before dispatch. Used for voice/image
+              events so the agent sees the transcript / description
+              instead of empty content.
+
+        Never returns ``{"action": "skip"}``; wake decisions are owned
+        by Hermes's native settings.
         """
         try:
             info = extract_matrix_event(event)
-        except Exception as exc:  # noqa: BLE001 - defensive; never crash the dispatch loop
-            logger.warning("transcript_recorder: extract failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            logger.warning("hermes_chat_recorder: extract failed: %s", exc)
             return None
 
         if info is None:
-            # Not a Matrix message we know how to handle. Let the
-            # gateway dispatch unmodified.
+            # Not a Matrix message we know how to handle.
             return None
 
         if info.is_reaction:
-            # Reactions aren't recorded as sections and never wake the
-            # agent. Skip so Hermes drops it on the floor.
-            return {"action": "skip", "reason": "reaction-not-recorded"}
+            # Reactions don't get recorded.
+            return None
 
         room_slug = room_slug_from_room_id(info.room_id)
 
-        # Sync-replay short-circuit. Matrix re-delivers events with the
-        # same event_id on reconnect — we MUST NOT double-wake the agent.
-        # Writer.has_event scans the day file we'd write into, so this
-        # is exact-match by anchor.
+        # Sync-replay duplicate — already in the vault. Don't double-
+        # record and don't fight Hermes's own dedupe.
         if self.writer.has_event(info.event_id, room_slug, info.timestamp):
-            logger.info(
-                "transcript_recorder: skipping duplicate event %s in %s",
-                info.event_id,
-                room_slug,
-            )
-            return {"action": "skip", "reason": "sync-replay-duplicate"}
+            return None
 
-        # 1) Persist a placeholder section so the event is durable even
-        #    if downstream processing crashes. If the vault write fails
-        #    we must NOT then make a wake decision against a missing
-        #    archive — return None (passthrough) so the gateway
-        #    dispatches normally and the failure is loud in logs.
+        # 1) Persist a placeholder so the event is durable even if
+        #    downstream processing crashes.
         if not self._write_placeholder(info, room_slug):
             logger.error(
-                "transcript_recorder: vault placeholder write failed for "
-                "event %s in %s; skipping gate and passing through",
+                "hermes_chat_recorder: vault placeholder write failed for "
+                "event %s in %s; passing through unmodified",
                 info.event_id,
                 room_slug,
             )
             return None
 
-        # 2) Process media (voice → transcript, image → description),
-        #    upgrade the section to its terminal stage.
-        gate_text = info.body
-        rewrite_text: str | None = None
-        voice_failed = False
-        image_failed = False
-
+        # 2) Process media → write terminal stage section.
         if info.kind == "voice":
             transcript, ok = self._process_voice(info, room_slug)
-            gate_text = transcript
-            voice_failed = not ok
             if ok and transcript:
-                rewrite_text = transcript
-        elif info.kind == "image":
+                return {"action": "rewrite", "text": transcript}
+            # Failed: rewrite to a placeholder so the agent sees SOMETHING
+            # if Hermes decides to wake it.
+            return {
+                "action": "rewrite",
+                "text": "[voice note — transcription failed; please retry or send as text]",
+            }
+
+        if info.kind == "image":
             description, ocr_text, ok = self._process_image(info, room_slug)
-            # Gate on caption + OCR text only — model-generated description
-            # MUST NOT be allowed to false-wake the agent.
-            gate_text = (info.body + "\n" + ocr_text).strip()
-            image_failed = not ok
             if ok and (description or ocr_text):
-                rewrite_text = self._format_image_rewrite(info.body, description, ocr_text)
+                return {
+                    "action": "rewrite",
+                    "text": self._format_image_rewrite(info.body, description, ocr_text),
+                }
+            # Failed: keep the caption (if any) so the agent has context.
+            fallback = info.body or "[image — description failed]"
+            return {"action": "rewrite", "text": fallback}
 
-        # 3) Apply the gate.
-        wake = self.gate.should_wake(
-            GateInput(
-                gate_text=gate_text or "",
-                bot_mxid=self.bot_mxid,
-                sender_mxid=info.sender_mxid,
-                mentioned_mxids=info.mentioned_mxids,
-            )
-        )
-
-        if not wake:
-            return {"action": "skip", "reason": "no-mention-or-nickname"}
-
-        # transcribe_failure_visible: if voice failed but the @-mention
-        # path woke him anyway (sender's intent was clear), give the
-        # agent SOMETHING coherent to respond to instead of an empty
-        # event.text. Same idea for image describe failures.
-        if rewrite_text is None and self.config.transcribe_failure_visible:
-            if voice_failed:
-                rewrite_text = (
-                    "[voice note — transcription failed; please retry "
-                    "or send as text]"
-                )
-            elif image_failed:
-                rewrite_text = (
-                    info.body
-                    or "[image — description failed; please retry or describe in text]"
-                )
-
-        if rewrite_text is not None:
-            return {"action": "rewrite", "text": rewrite_text}
-        return {"action": "allow"}
+        # Text events: passthrough.
+        return None
 
     # ------------------------------------------------------------------
     # Outbound recording (called from the wrapped adapter.send)
@@ -236,8 +207,7 @@ class Recorder:
         timestamp: Any,
         reply_to_event_id: str | None = None,
     ) -> None:
-        """Record the bot's own reply to the vault. Called from the
-        wrapper around the Matrix adapter's send method."""
+        """Record the bot's own reply to the vault."""
         if not self.config.record_outbound:
             return
         room_slug = room_slug_from_room_id(room_id)
@@ -255,20 +225,15 @@ class Recorder:
         )
         try:
             self.writer.write_section(section, room_slug=room_slug)
-        except Exception as exc:  # noqa: BLE001 - we never want vault failure to break send
-            logger.warning("transcript_recorder: outbound write failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes_chat_recorder: outbound write failed: %s", exc)
 
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
 
     def _write_placeholder(self, info: MatrixEventInfo, room_slug: str) -> bool:
-        """Write the initial placeholder section. Returns True on
-        success, False on failure. The "always store" guarantee in
-        ``docs/DESIGN.md §6`` means a False return here must short-
-        circuit the wake decision in the caller — the gate cannot
-        produce a meaningful answer against a missing archive.
-        """
+        """Write the initial placeholder section. Returns success."""
         fields = self._fields_for(info)
         body = info.body if info.kind == "text" else "(processing media…)"
         section = Section(
@@ -284,7 +249,7 @@ class Recorder:
             self.writer.write_section(section, room_slug=room_slug)
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "transcript_recorder: placeholder write failed for %s in %s: %s",
+                "hermes_chat_recorder: placeholder write failed for %s in %s: %s",
                 info.event_id,
                 room_slug,
                 exc,
@@ -308,9 +273,6 @@ class Recorder:
         """
         download = self._download_media
 
-        # Check the cheap preconditions BEFORE lazy-loading faster-whisper,
-        # so a misconfigured deploy doesn't pay the ~10s model-load cost
-        # just to write a failure section.
         if download is None or not info.mxc_url:
             self._write_terminal(
                 info,
@@ -429,17 +391,12 @@ class Recorder:
         try:
             self.writer.write_section(section, room_slug=room_slug)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("transcript_recorder: terminal write failed: %s", exc)
+            logger.warning("hermes_chat_recorder: terminal write failed: %s", exc)
 
     def _transcribe_bytes(
         self, transcriber: Transcriber, audio_bytes: bytes, mime: str
     ) -> str:
-        """Spill bytes to a tempfile so faster-whisper can read them.
-
-        faster-whisper accepts file paths or numpy arrays; the tempfile
-        hop is the lowest-friction path that works for both ogg and
-        opus voice notes from Matrix.
-        """
+        """Spill bytes to a tempfile so faster-whisper can read them."""
         import os
         import tempfile
 

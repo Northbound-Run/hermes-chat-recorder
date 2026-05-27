@@ -13,7 +13,6 @@ def test_none_block_returns_defaults() -> None:
     cfg = load_config(None, env={})
     assert cfg.enabled is True
     assert cfg.vault_root == Path("/data/vault/transcripts")
-    assert cfg.nicknames == ()
     assert cfg.timezone == "America/Los_Angeles"
     assert cfg.image_describer_model == "google/gemini-3-flash-preview"
     assert cfg.whisper_model_size == "base"
@@ -25,23 +24,19 @@ def test_block_values_override_defaults() -> None:
         {
             "enabled": True,
             "vault_root": "/tmp/vault",
-            "nicknames": ["ralph", "Ralphy"],
             "record_outbound": False,
             "timezone": "Europe/London",
             "image_describer_model": "anthropic/claude-3-5-sonnet",
             "whisper_model_size": "small",
-            "transcribe_failure_visible": False,
             "pending_voice_ttl_seconds": 90,
         },
         env={},
     )
     assert cfg.vault_root == Path("/tmp/vault")
-    assert cfg.nicknames == ("ralph", "Ralphy")
     assert cfg.record_outbound is False
     assert cfg.timezone == "Europe/London"
     assert cfg.image_describer_model == "anthropic/claude-3-5-sonnet"
     assert cfg.whisper_model_size == "small"
-    assert cfg.transcribe_failure_visible is False
     assert cfg.pending_voice_ttl_seconds == 90
 
 
@@ -137,14 +132,6 @@ def test_empty_env_does_not_override() -> None:
     assert cfg.openrouter_api_key == ""
 
 
-def test_nicknames_filters_non_strings_and_blanks() -> None:
-    cfg = load_config(
-        {"nicknames": ["ralph", "", "  ", None, 123, "Ralphy"]},  # type: ignore[list-item]
-        env={},
-    )
-    assert cfg.nicknames == ("ralph", "Ralphy")
-
-
 def test_non_mapping_block_raises() -> None:
     with pytest.raises(ConfigError, match="must be a mapping"):
         load_config("not a dict", env={})  # type: ignore[arg-type]
@@ -158,11 +145,6 @@ def test_bad_vault_root_type_raises() -> None:
 def test_empty_vault_root_string_raises() -> None:
     with pytest.raises(ConfigError, match="vault_root"):
         load_config({"vault_root": "  "}, env={})
-
-
-def test_bad_nicknames_type_raises() -> None:
-    with pytest.raises(ConfigError, match="nicknames"):
-        load_config({"nicknames": "ralph"}, env={})
 
 
 def test_bad_pending_ttl_raises() -> None:

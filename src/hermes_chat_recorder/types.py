@@ -61,21 +61,6 @@ class Section:
 
 
 @dataclass(frozen=True)
-class GateInput:
-    """Inputs to :func:`hermes_chat_recorder.gate.Gate.should_wake`.
-
-    Kept as a dataclass so call-sites are explicit about what's being
-    passed; misordered positional arguments are a real risk in this
-    function and a dataclass makes them all keyword-only at call.
-    """
-
-    gate_text: str
-    bot_mxid: str
-    sender_mxid: str
-    mentioned_mxids: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True)
 class DescribeResult:
     """Output of :func:`hermes_chat_recorder.describer.ImageDescriber.describe`."""
 
