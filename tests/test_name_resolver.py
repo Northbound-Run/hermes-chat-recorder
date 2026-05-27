@@ -186,3 +186,59 @@ def test_user_display_swallows_lookup_exceptions() -> None:
 
     r = NameResolver(user_name_lookup=_boom)
     assert r.user_display("@matt:srv") == "matt"
+
+
+# ---------------------------------------------------------------------------
+# Manual overrides
+# ---------------------------------------------------------------------------
+
+
+def test_room_override_beats_lookup() -> None:
+    """User-supplied override takes precedence over m.room.name."""
+    r = NameResolver(
+        room_name_lookup=lambda _: "Auto Name",
+        room_overrides={"!abc:srv": "Family Group"},
+    )
+    assert r.room_slug("!abc:srv") == "Family-Group"
+
+
+def test_room_override_sanitized_to_slug() -> None:
+    r = NameResolver(room_overrides={"!abc:srv": "Matt & Annika"})
+    assert r.room_slug("!abc:srv") == "Matt-and-Annika"
+
+
+def test_room_override_only_applies_to_listed_rooms() -> None:
+    """Other rooms still go through the normal lookup chain."""
+    r = NameResolver(
+        room_overrides={"!abc:srv": "Family"},
+        room_name_lookup=lambda rid: "Work" if rid == "!xyz:srv" else None,
+    )
+    assert r.room_slug("!abc:srv") == "Family"
+    assert r.room_slug("!xyz:srv") == "Work"
+
+
+def test_user_override_beats_lookup() -> None:
+    r = NameResolver(
+        user_name_lookup=lambda mxid: "Profile Name" if mxid == "@other:srv" else None,
+        user_overrides={"@signal_abc:srv": "Matt"},
+    )
+    assert r.user_display("@signal_abc:srv") == "Matt"
+    # Other users still go through the normal lookup chain.
+    assert r.user_display("@other:srv") == "Profile Name"
+
+
+def test_user_override_verbatim_no_sanitization() -> None:
+    """Section headers carry the display name as-is — no hyphenation."""
+    r = NameResolver(user_overrides={"@signal_abc:srv": "Matt H."})
+    assert r.user_display("@signal_abc:srv") == "Matt H."
+
+
+def test_empty_override_string_does_not_apply() -> None:
+    """Empty / whitespace overrides fall through to the normal chain."""
+    r = NameResolver(
+        room_overrides={"!abc:srv": "   "},
+        user_overrides={"@matt:srv": ""},
+        user_name_lookup=lambda _: "Lookup Name",
+    )
+    assert r.room_slug("!abc:srv") == "abc"  # falls back to slug-from-id
+    assert r.user_display("@matt:srv") == "Lookup Name"

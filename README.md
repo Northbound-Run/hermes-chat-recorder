@@ -65,6 +65,15 @@ plugins:
     vault_root: /data/vault/transcripts
     record_outbound: true
     timezone: America/Los_Angeles
+
+    # Optional: manual name overrides. Useful when a Signal/WhatsApp
+    # bridge user has no homeserver display name, or when you want to
+    # rename a room. Overrides win over any automatic Matrix lookup.
+    name_overrides:
+      rooms:
+        "!abcdef1234:agentchannels.dev": "Matt's Signal"
+      users:
+        "@signal_2c991545-...:agentchannels.dev": "Matt"
 ```
 
 STT and vision are configured **at the Hermes top level**, not here:

@@ -43,7 +43,4 @@ def test_register_callable_with_minimal_ctx(tmp_path) -> None:
 
     result = hermes_chat_recorder.register(ctx)
     assert result is not None
-    assert {name for name, _ in hooks_bound} == {
-        "pre_gateway_dispatch",
-        "on_session_start",
-    }
+    assert {name for name, _ in hooks_bound} == {"pre_gateway_dispatch"}

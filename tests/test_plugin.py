@@ -28,6 +28,38 @@ def _build_ctx(plugin_block: dict, hooks: list) -> Any:
     )
 
 
+def _neutral_event() -> Any:
+    """Non-Matrix event the recorder will pass through as ``None``.
+
+    Used by wiring tests to invoke ``pre_gateway_dispatch`` purely for
+    its side effect of firing the lazy gateway-wire callback. The
+    recorder's matrix-event extractor returns ``None`` for non-Matrix
+    platforms, so no vault writes happen and the event flows on.
+    """
+    return SimpleNamespace(
+        text="",
+        message_id="$wiring:srv",
+        message_type=SimpleNamespace(name="TEXT"),
+        source=SimpleNamespace(
+            platform=SimpleNamespace(value="telegram"),
+            chat_id="!noop",
+            user_id="@noop",
+        ),
+        raw_message=SimpleNamespace(),
+    )
+
+
+def _fire_wiring(pre_dispatch, gateway: Any) -> None:
+    """Invoke pre_gateway_dispatch with a neutral event so the recorder
+    fires its lazy gateway-wire callback. Mirrors the old
+    ``on_start(gateway=gateway)`` semantics for the test suite."""
+    pre_dispatch(event=_neutral_event(), gateway=gateway, session_store=None)
+
+
+def _take(hooks: list, name: str):
+    return next(cb for hname, cb in hooks if hname == name)
+
+
 # ---------------------------------------------------------------------------
 # Basic register() behaviour
 # ---------------------------------------------------------------------------
@@ -40,7 +72,7 @@ def test_register_returns_recorder_and_binds_two_hooks(tmp_path: Path) -> None:
     recorder = register(ctx)
     assert recorder is not None
     bound_names = {name for name, _ in hooks}
-    assert bound_names == {"pre_gateway_dispatch", "on_session_start"}
+    assert bound_names == {"pre_gateway_dispatch"}
 
 
 def test_register_returns_none_when_disabled(tmp_path: Path) -> None:
@@ -73,7 +105,7 @@ def test_register_with_no_config_attr_uses_defaults(tmp_path: Path) -> None:
     ctx = SimpleNamespace(register_hook=lambda name, cb: hooks.append((name, cb)))
     recorder = register(ctx)
     assert recorder is not None
-    assert {name for name, _ in hooks} == {"pre_gateway_dispatch", "on_session_start"}
+    assert {name for name, _ in hooks} == {"pre_gateway_dispatch"}
 
 
 # ---------------------------------------------------------------------------
@@ -131,11 +163,11 @@ def test_on_session_start_binds_bot_mxid_and_wraps_send(tmp_path: Path) -> None:
     recorder = register(ctx)
     assert recorder is not None
 
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
     adapter = _FakeSyncAdapter(user_id="@ralph:srv")
     gateway = _build_gateway(adapter)
 
-    on_start(gateway=gateway)
+    _fire_wiring(pre_dispatch, gateway)
 
     # bot_mxid carried over from adapter.user_id
     assert recorder.bot_mxid == "@ralph:srv"
@@ -156,12 +188,12 @@ def test_on_session_start_wrap_is_idempotent(tmp_path: Path) -> None:
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
     assert recorder is not None
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _FakeSyncAdapter()
     gateway = _build_gateway(adapter)
-    on_start(gateway=gateway)
-    on_start(gateway=gateway)
+    _fire_wiring(pre_dispatch, gateway)
+    _fire_wiring(pre_dispatch, gateway)
 
     adapter.send("!room:srv", "hi")
     content = next(tmp_path.rglob("*.md")).read_text()
@@ -173,20 +205,22 @@ def test_on_session_start_with_missing_gateway_kwarg_is_safe(tmp_path: Path) -> 
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
-    # No exception, no crash — just logs and continues.
-    on_start()
-    on_start(gateway=None)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+    # No exception, no crash — wiring callback simply doesn't fire
+    # when no gateway is supplied (matches Hermes's reality: only
+    # pre_gateway_dispatch ever delivers the gateway object).
+    _fire_wiring(pre_dispatch, None)
+    pre_dispatch(event=_neutral_event(), session_store=None)
 
 
 def test_on_session_start_with_no_matrix_adapter_is_safe(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     gateway = SimpleNamespace(adapters={"telegram": object()})
-    on_start(gateway=gateway)  # noop, no exception
+    _fire_wiring(pre_dispatch, gateway)  # noop, no exception
 
 
 def test_on_session_start_resolves_download_callable(tmp_path: Path) -> None:
@@ -194,11 +228,11 @@ def test_on_session_start_resolves_download_callable(tmp_path: Path) -> None:
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
     assert recorder is not None
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _FakeSyncAdapter()
     gateway = _build_gateway(adapter)
-    on_start(gateway=gateway)
+    _fire_wiring(pre_dispatch, gateway)
 
     # The download callable now points at the adapter's download_media.
     assert recorder._download_media is not None  # noqa: SLF001 - test internal
@@ -227,11 +261,11 @@ def test_on_session_start_handles_async_send_adapter(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _FakeAsyncAdapter()
     gateway = _build_gateway(adapter)
-    on_start(gateway=gateway)
+    _fire_wiring(pre_dispatch, gateway)
 
     # Drive the async wrapper from an event loop.
     asyncio.run(adapter.send("!room:srv", "hi from async"))
@@ -250,13 +284,13 @@ def test_bot_mxid_resolved_via_config_attr(tmp_path: Path) -> None:
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
     assert recorder is not None
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = SimpleNamespace(
         config=SimpleNamespace(user_id="@from_config:srv"),
         send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
     )
-    on_start(gateway=_build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _build_gateway(adapter))
     assert recorder.bot_mxid == "@from_config:srv"
 
 
@@ -287,10 +321,10 @@ def test_wrap_send_handles_sync_function_returning_coroutine(tmp_path: Path) -> 
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _SyncReturningCoroAdapter()
-    on_start(gateway=_build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _build_gateway(adapter))
 
     # Caller is sync; result must be awaited via the background loop
     # before we record. Without the fix, the recorded event_id would
@@ -359,7 +393,7 @@ def test_name_resolver_wires_pretty_room_and_user_names(tmp_path: Path) -> None:
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
     assert recorder is not None
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     client = _FakeNameClient()
     adapter = SimpleNamespace(
@@ -367,7 +401,7 @@ def test_name_resolver_wires_pretty_room_and_user_names(tmp_path: Path) -> None:
         client=client,
         send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
     )
-    on_start(gateway=_build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _build_gateway(adapter))
 
     assert recorder.resolver.room_slug("!room1:srv") == "Matt-and-Annika"
     assert recorder.resolver.user_display("@matt:srv") == "Matt Hall"
@@ -379,7 +413,7 @@ def test_name_resolver_falls_back_to_dm_peer_when_room_name_missing(
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     client = _FakeNameClient()
     adapter = SimpleNamespace(
@@ -387,7 +421,7 @@ def test_name_resolver_falls_back_to_dm_peer_when_room_name_missing(
         client=client,
         send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
     )
-    on_start(gateway=_build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _build_gateway(adapter))
 
     # !dmroom:srv has no m.room.name; resolver should pick the peer's
     # display name (skipping the bot itself).
@@ -400,13 +434,13 @@ def test_name_resolver_safe_when_adapter_has_no_client(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = SimpleNamespace(
         user_id="@ralph:srv",
         send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
     )
-    on_start(gateway=_build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _build_gateway(adapter))
 
     # Falls back to slug-from-room-id.
     assert recorder.resolver.room_slug("!abc:srv") == "abc"
@@ -428,10 +462,10 @@ def test_async_download_callable_works_from_inside_running_loop(tmp_path: Path) 
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
     assert recorder is not None
-    on_start = next(cb for name, cb in hooks if name == "on_session_start")
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _AsyncDownloadAdapter()
-    on_start(gateway=_build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _build_gateway(adapter))
     assert recorder._download_media is not None  # noqa: SLF001
 
     async def _drive() -> bytes:

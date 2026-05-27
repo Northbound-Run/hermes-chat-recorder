@@ -89,10 +89,18 @@ class NameResolver:
         room_name_lookup: Lookup | None = None,
         user_name_lookup: Lookup | None = None,
         dm_peer_lookup: Lookup | None = None,
+        room_overrides: dict[str, str] | None = None,
+        user_overrides: dict[str, str] | None = None,
     ) -> None:
         self._room_name_lookup = room_name_lookup
         self._user_name_lookup = user_name_lookup
         self._dm_peer_lookup = dm_peer_lookup
+        # Explicit user-supplied overrides win over any Matrix lookup.
+        # Useful for bridge users (Signal, WhatsApp) who never get a
+        # display name set on the homeserver, and for power users who
+        # just want to rename a room.
+        self._room_overrides = dict(room_overrides or {})
+        self._user_overrides = dict(user_overrides or {})
         self._room_slug_cache: dict[str, str] = {}
         self._user_display_cache: dict[str, str] = {}
         self._lock = threading.Lock()
@@ -124,9 +132,9 @@ class NameResolver:
     def room_slug(self, room_id: str) -> str:
         """Filesystem-safe folder slug for a room.
 
-        Resolution order: m.room.name → DM peer display name →
-        ``room_slug_from_room_id`` fallback. Result is cached for the
-        process lifetime.
+        Resolution order: explicit override → m.room.name → DM peer
+        display name → ``room_slug_from_room_id`` fallback. Result is
+        cached for the process lifetime.
         """
         if not room_id:
             return "unknown-room"
@@ -135,6 +143,15 @@ class NameResolver:
             cached = self._room_slug_cache.get(room_id)
         if cached is not None:
             return cached
+
+        # User-supplied overrides win — sanitized to a filesystem-safe
+        # slug exactly like an auto-resolved name.
+        override = self._room_overrides.get(room_id)
+        if override:
+            slug = sanitize_slug(override) or room_slug_from_room_id(room_id)
+            with self._lock:
+                self._room_slug_cache[room_id] = slug
+            return slug
 
         resolved: str | None = None
         if self._room_name_lookup is not None:
@@ -153,9 +170,9 @@ class NameResolver:
     def user_display(self, mxid: str) -> str:
         """Human-readable display name for a user.
 
-        Resolution order: injected profile lookup → MXID localpart →
-        raw MXID (last resort, never empty for a non-empty input).
-        Result is cached for the process lifetime.
+        Resolution order: explicit override → injected profile lookup →
+        MXID localpart → raw MXID (last resort, never empty for a
+        non-empty input). Result is cached for the process lifetime.
         """
         if not mxid:
             return ""
@@ -164,6 +181,15 @@ class NameResolver:
             cached = self._user_display_cache.get(mxid)
         if cached is not None:
             return cached
+
+        # Overrides take the human-readable string verbatim — no
+        # sanitization, because section headers carry the name as-is.
+        override = self._user_overrides.get(mxid)
+        if override and override.strip():
+            display = override.strip()
+            with self._lock:
+                self._user_display_cache[mxid] = display
+            return display
 
         resolved: str | None = None
         if self._user_name_lookup is not None:

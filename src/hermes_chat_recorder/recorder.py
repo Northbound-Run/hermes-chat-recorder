@@ -72,17 +72,26 @@ class Recorder:
         describer: ImageDescriber | None = None,
         bot_mxid: str = "",
         download_media: DownloadMedia | None = None,
+        wire_gateway_once: Callable[[Any], None] | None = None,
     ) -> None:
         self.config = config
         self.writer = writer
         # Resolver defaults to a bare instance with no lookups wired —
         # falls back to room_slug_from_room_id / MXID localpart until
-        # plugin.on_session_start binds the live Matrix client.
+        # the gateway-wiring callback (below) plumbs the live Matrix
+        # client through on the first pre_gateway_dispatch.
         self.resolver = resolver if resolver is not None else NameResolver()
         self._transcriber = transcriber
         self._describer = describer
         self.bot_mxid = bot_mxid
         self._download_media = download_media
+        # Hermes's ``on_session_start`` hook only receives ``session_id``
+        # — not the gateway — so we can't reach the live Matrix adapter
+        # from there. Instead, wire the adapter lazily on the first
+        # ``pre_gateway_dispatch`` invocation (which DOES receive
+        # ``gateway=self``, see gateway/run.py:5805 in Hermes).
+        self._wire_gateway_once = wire_gateway_once
+        self._gateway_wired = False
 
     # ------------------------------------------------------------------
     # Wiring helpers used by plugin.py at on_session_start time
@@ -140,6 +149,8 @@ class Recorder:
         Never returns ``{"action": "skip"}``; wake decisions are owned
         by Hermes's native settings.
         """
+        self._maybe_wire_gateway(gateway)
+
         try:
             info = extract_matrix_event(event)
         except Exception as exc:
@@ -265,6 +276,24 @@ class Recorder:
             )
             return False
         return True
+
+    def _maybe_wire_gateway(self, gateway: Any) -> None:
+        """Fire the gateway-wiring callback exactly once, on first message.
+
+        Hermes's ``on_session_start`` hook doesn't receive the gateway
+        object (see hermes_cli/hooks.py:142), so adapter wiring can't
+        happen there. ``pre_gateway_dispatch`` is the earliest hook
+        that does get it. We dedupe via ``self._gateway_wired`` so a
+        late-arriving second gateway (e.g. test ctx that swaps gateways
+        between calls) doesn't double-wrap ``adapter.send``.
+        """
+        if self._gateway_wired or gateway is None or self._wire_gateway_once is None:
+            return
+        self._gateway_wired = True
+        try:
+            self._wire_gateway_once(gateway)
+        except Exception as exc:  # noqa: BLE001 - wiring must never break dispatch
+            logger.warning("hermes_chat_recorder: gateway wiring failed: %s", exc)
 
     def _best_display(self, hint: str, mxid: str) -> str:
         """Return the friendliest available display string for a sender.

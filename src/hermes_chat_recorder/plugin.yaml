@@ -1,5 +1,5 @@
 name: chat_recorder
-version: 0.3.0
+version: 0.4.0
 description: "Record every Hermes Matrix chat message into a vault (text, voice transcripts, image descriptions). Pretty room/user names. STT and vision delegated to Hermes's built-in tools."
 author: Northbound
 license: MIT
@@ -17,4 +17,3 @@ optional_env:
 # list for the `hermes gateway plugins list` view.
 hooks:
   - pre_gateway_dispatch
-  - on_session_start

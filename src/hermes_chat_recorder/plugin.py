@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hermes_chat_recorder.config import ConfigError, load_config
-from hermes_chat_recorder.name_resolver import mxid_localpart
+from hermes_chat_recorder.name_resolver import NameResolver, mxid_localpart
 from hermes_chat_recorder.recorder import Recorder
 from hermes_chat_recorder.writer import VaultWriter
 
@@ -45,12 +45,22 @@ def register(ctx: Any) -> Recorder | None:
         return None
 
     writer = VaultWriter(vault_root=config.vault_root, timezone=config.timezone)
+
+    # Recorder holds the wiring callback and fires it lazily on the
+    # first ``pre_gateway_dispatch`` (Hermes's ``on_session_start``
+    # hook only ships ``session_id``, never the gateway object — so we
+    # can't wire there).
+    def _wire(gateway: Any) -> None:
+        _wire_matrix_adapter(recorder, gateway=gateway)
+
     recorder = Recorder(
         config=config,
         writer=writer,
-        # Transcriber and describer are constructed lazily on first use
-        # so plugin load stays cheap even when faster-whisper is in the
-        # venv but no audio has been processed yet.
+        resolver=NameResolver(
+            room_overrides=config.room_overrides,
+            user_overrides=config.user_overrides,
+        ),
+        wire_gateway_once=_wire,
     )
 
     if not hasattr(ctx, "register_hook"):
@@ -63,13 +73,13 @@ def register(ctx: Any) -> Recorder | None:
     _assert_hooks_available()
 
     ctx.register_hook("pre_gateway_dispatch", recorder.on_pre_gateway_dispatch)
-    ctx.register_hook(
-        "on_session_start", lambda **kw: _wire_matrix_adapter(recorder, **kw)
-    )
 
     logger.info(
-        "hermes_chat_recorder: registered (vault_root=%s) — STT and vision delegated to Hermes",
+        "hermes_chat_recorder: registered (vault_root=%s, "
+        "room_overrides=%d, user_overrides=%d) — STT and vision delegated to Hermes",
         config.vault_root,
+        len(config.room_overrides),
+        len(config.user_overrides),
     )
     return recorder
 
@@ -94,7 +104,7 @@ def _assert_hooks_available() -> None:
         )
         return
 
-    required = {"pre_gateway_dispatch", "on_session_start"}
+    required = {"pre_gateway_dispatch"}
     missing = required - set(VALID_HOOKS)
     if missing:
         raise RuntimeError(
@@ -145,21 +155,24 @@ def _read_plugin_block(ctx: Any) -> dict | None:
 
 
 def _wire_matrix_adapter(recorder: Recorder, **kwargs: Any) -> None:
-    """Locate the live Matrix adapter at session-start and wire it up.
+    """Locate the live Matrix adapter and wire it up to the recorder.
 
-    We look up the adapter via ``gateway.adapters`` (a dict keyed by
-    platform name). On finding it we:
+    Called lazily from the recorder on the first
+    ``pre_gateway_dispatch`` invocation (which is the earliest hook that
+    actually receives ``gateway=self`` from Hermes). On finding the
+    adapter we:
 
     1. Capture a callable that downloads bytes for an ``mxc://`` URL.
        Adapter method names differ across mautrix versions — try a few.
     2. Read the bot's MXID from the adapter's config.
-    3. Wrap the adapter's ``send`` method so outbound replies land in
+    3. Wire the resolver's lookups to the live Matrix client.
+    4. Wrap the adapter's ``send`` method so outbound replies land in
        the vault.
     """
     gateway = kwargs.get("gateway") or kwargs.get("gateway_runner")
     if gateway is None:
         logger.warning(
-            "hermes_chat_recorder: on_session_start called without a gateway kwarg; "
+            "hermes_chat_recorder: wiring callback fired without a gateway; "
             "outbound recording and media download will be unavailable."
         )
         return

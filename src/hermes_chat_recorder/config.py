@@ -23,6 +23,12 @@ class RecorderConfig:
     record_outbound: bool = True
     timezone: str = "America/Los_Angeles"
 
+    # Manual name overrides. Useful for bridge-puppet MXIDs (Signal,
+    # WhatsApp) that never get a homeserver display name. The plugin
+    # checks these before any Matrix lookup.
+    room_overrides: dict[str, str] = field(default_factory=dict, compare=False)
+    user_overrides: dict[str, str] = field(default_factory=dict, compare=False)
+
     raw_block: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
@@ -138,10 +144,51 @@ def load_config(
                 "hermes-chat-recorder; remove it from your config."
             )
 
+    name_overrides = block.get("name_overrides", {}) or {}
+    if not isinstance(name_overrides, dict):
+        raise ConfigError(
+            f"name_overrides must be a mapping, got {type(name_overrides).__name__}"
+        )
+    room_overrides = _parse_override_map(
+        name_overrides.get("rooms"), key_label="name_overrides.rooms"
+    )
+    user_overrides = _parse_override_map(
+        name_overrides.get("users"), key_label="name_overrides.users"
+    )
+
     return RecorderConfig(
         enabled=enabled,
         vault_root=vault_root,
         record_outbound=record_outbound,
         timezone=tz,
+        room_overrides=room_overrides,
+        user_overrides=user_overrides,
         raw_block=block,
     )
+
+
+def _parse_override_map(value: Any, *, key_label: str) -> dict[str, str]:
+    """Parse a YAML mapping of ``{matrix_id: display_name}`` overrides.
+
+    Empty / None inputs return an empty dict. Validates that keys and
+    values are non-empty strings — silently dropping malformed entries
+    would mask user typos.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{key_label} must be a mapping, got {type(value).__name__}"
+        )
+    cleaned: dict[str, str] = {}
+    for k, v in value.items():
+        if not isinstance(k, str) or not k.strip():
+            raise ConfigError(
+                f"{key_label}: keys must be non-empty strings, got {k!r}"
+            )
+        if not isinstance(v, str) or not v.strip():
+            raise ConfigError(
+                f"{key_label}: values must be non-empty strings, got {v!r} for key {k!r}"
+            )
+        cleaned[k.strip()] = v.strip()
+    return cleaned

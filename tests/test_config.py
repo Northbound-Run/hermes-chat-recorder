@@ -145,3 +145,84 @@ def test_raw_block_preserved_for_diagnostics() -> None:
 def test_disabled_flag() -> None:
     cfg = load_config({"enabled": False, "vault_root": "/x"}, env={})
     assert cfg.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Manual name overrides
+# ---------------------------------------------------------------------------
+
+
+def test_no_name_overrides_means_empty_dicts() -> None:
+    cfg = load_config({"vault_root": "/x"}, env={})
+    assert cfg.room_overrides == {}
+    assert cfg.user_overrides == {}
+
+
+def test_name_overrides_parsed() -> None:
+    cfg = load_config(
+        {
+            "vault_root": "/x",
+            "name_overrides": {
+                "rooms": {"!abc:srv": "Family"},
+                "users": {"@signal_xyz:srv": "Matt"},
+            },
+        },
+        env={},
+    )
+    assert cfg.room_overrides == {"!abc:srv": "Family"}
+    assert cfg.user_overrides == {"@signal_xyz:srv": "Matt"}
+
+
+def test_name_overrides_strips_whitespace() -> None:
+    cfg = load_config(
+        {
+            "vault_root": "/x",
+            "name_overrides": {"rooms": {"  !abc:srv  ": "  Family  "}},
+        },
+        env={},
+    )
+    assert cfg.room_overrides == {"!abc:srv": "Family"}
+
+
+def test_name_overrides_partial_section_ok() -> None:
+    """Either rooms or users alone should work — not both required."""
+    cfg = load_config(
+        {"vault_root": "/x", "name_overrides": {"rooms": {"!abc:srv": "Family"}}},
+        env={},
+    )
+    assert cfg.user_overrides == {}
+
+
+def test_name_overrides_rejects_non_mapping() -> None:
+    with pytest.raises(ConfigError, match="name_overrides must be a mapping"):
+        load_config({"vault_root": "/x", "name_overrides": "nope"}, env={})
+
+
+def test_name_overrides_rejects_non_mapping_rooms() -> None:
+    with pytest.raises(ConfigError, match="name_overrides.rooms must be a mapping"):
+        load_config(
+            {"vault_root": "/x", "name_overrides": {"rooms": ["not", "a", "dict"]}},
+            env={},
+        )
+
+
+def test_name_overrides_rejects_blank_value() -> None:
+    with pytest.raises(ConfigError, match="must be non-empty strings"):
+        load_config(
+            {
+                "vault_root": "/x",
+                "name_overrides": {"rooms": {"!abc:srv": ""}},
+            },
+            env={},
+        )
+
+
+def test_name_overrides_rejects_non_string_value() -> None:
+    with pytest.raises(ConfigError, match="must be non-empty strings"):
+        load_config(
+            {
+                "vault_root": "/x",
+                "name_overrides": {"users": {"@matt:srv": 12345}},
+            },
+            env={},
+        )

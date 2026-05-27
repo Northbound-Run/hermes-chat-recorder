@@ -450,6 +450,44 @@ def test_outbound_respects_explicit_friendly_sender(tmp_path: Path) -> None:
     assert "Resolver Result" not in content
 
 
+def test_lazy_gateway_wire_fires_on_first_dispatch_only(tmp_path: Path) -> None:
+    """The wiring callback fires exactly once — on the first
+    pre_gateway_dispatch with a gateway. Subsequent dispatches don't
+    re-fire it (avoiding double-wrapping ``adapter.send``)."""
+    cfg = RecorderConfig(vault_root=tmp_path)
+    writer = VaultWriter(vault_root=tmp_path, timezone="UTC")
+    calls: list = []
+    r = Recorder(
+        config=cfg,
+        writer=writer,
+        wire_gateway_once=lambda gw: calls.append(gw),
+    )
+
+    fake_gateway_1 = object()
+    fake_gateway_2 = object()
+
+    r.on_pre_gateway_dispatch(event=_event(text="hi"), gateway=fake_gateway_1)
+    r.on_pre_gateway_dispatch(event=_event(text="again", message_id="$2"), gateway=fake_gateway_2)
+    r.on_pre_gateway_dispatch(event=_event(text="third", message_id="$3"), gateway=None)
+
+    assert calls == [fake_gateway_1]
+
+
+def test_lazy_gateway_wire_swallows_exceptions(tmp_path: Path) -> None:
+    """If wire-once raises, dispatch must still proceed normally."""
+    cfg = RecorderConfig(vault_root=tmp_path)
+    writer = VaultWriter(vault_root=tmp_path, timezone="UTC")
+
+    def _boom(_):
+        raise RuntimeError("wiring exploded")
+
+    r = Recorder(config=cfg, writer=writer, wire_gateway_once=_boom)
+    # Should NOT raise. The text message still gets recorded.
+    result = r.on_pre_gateway_dispatch(event=_event(text="hi"), gateway=object())
+    assert result is None
+    assert next(tmp_path.rglob("*.md")).read_text().count("hi") >= 1
+
+
 def test_fallback_to_slug_from_room_id_when_resolver_blank(tmp_path: Path) -> None:
     """With no lookups wired, the room folder reverts to the legacy
     `room_slug_from_room_id` behavior."""
