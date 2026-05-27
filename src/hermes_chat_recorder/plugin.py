@@ -44,7 +44,11 @@ def register(ctx: Any) -> Recorder | None:
         logger.info("hermes_chat_recorder: plugin disabled via config, skipping")
         return None
 
-    writer = VaultWriter(vault_root=config.vault_root, timezone=config.timezone)
+    writer = VaultWriter(
+        vault_root=config.vault_root,
+        timezone=config.timezone,
+        flat_layout=(config.bot_type == "1on1"),
+    )
 
     # Recorder holds the wiring callback and fires it lazily on the
     # first ``pre_gateway_dispatch`` (Hermes's ``on_session_start``
@@ -75,9 +79,10 @@ def register(ctx: Any) -> Recorder | None:
     ctx.register_hook("pre_gateway_dispatch", recorder.on_pre_gateway_dispatch)
 
     logger.info(
-        "hermes_chat_recorder: registered (vault_root=%s, "
+        "hermes_chat_recorder: registered (vault_root=%s, bot_type=%s, "
         "room_overrides=%d, user_overrides=%d) — STT and vision delegated to Hermes",
         config.vault_root,
+        config.bot_type,
         len(config.room_overrides),
         len(config.user_overrides),
     )

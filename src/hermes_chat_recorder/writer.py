@@ -127,10 +127,22 @@ class VaultWriter:
     different day files don't contend.
     """
 
-    def __init__(self, *, vault_root: Path | str, timezone: str = "America/Los_Angeles") -> None:
+    def __init__(
+        self,
+        *,
+        vault_root: Path | str,
+        timezone: str = "America/Los_Angeles",
+        flat_layout: bool = False,
+    ) -> None:
         self._vault_root = Path(vault_root)
         self._tz = ZoneInfo(timezone)
-        # Maps (room_slug, "YYYY-MM-DD") -> Lock. Created lazily.
+        # When ``flat_layout`` is true the writer ignores the
+        # ``room_slug`` argument and dumps everything into
+        # ``<vault_root>/<YYYY-MM-DD>.md``. Useful for 1-on-1 bots that
+        # only ever live in a single DM — the per-room subfolder is
+        # noise in that case.
+        self._flat_layout = flat_layout
+        # Maps (slug-or-flat-marker, "YYYY-MM-DD") -> Lock. Created lazily.
         self._locks: dict[tuple[str, str], threading.Lock] = {}
         self._locks_lock = threading.Lock()
 
@@ -143,9 +155,16 @@ class VaultWriter:
         return self._tz
 
     def day_file_path(self, room_slug: str, timestamp: datetime) -> Path:
-        """Return the absolute path of the per-day file an event belongs in."""
+        """Return the absolute path of the per-day file an event belongs in.
+
+        In flat-layout mode the ``room_slug`` argument is ignored and
+        everything writes directly under ``vault_root``.
+        """
         local = self._localize(timestamp)
-        return self._vault_root / room_slug / f"{local.strftime('%Y-%m-%d')}.md"
+        date_part = f"{local.strftime('%Y-%m-%d')}.md"
+        if self._flat_layout:
+            return self._vault_root / date_part
+        return self._vault_root / room_slug / date_part
 
     def write_section(self, section: Section, *, room_slug: str) -> WriteOutcome:
         """Append or update a section in the appropriate day file.
@@ -214,7 +233,11 @@ class VaultWriter:
         return ts.astimezone(self._tz)
 
     def _get_lock(self, room_slug: str, date_str: str) -> threading.Lock:
-        key = (room_slug, date_str)
+        # In flat layout, all writes for a given day share one file —
+        # so they MUST share one lock regardless of which room they
+        # originated from, otherwise two simultaneous writers from
+        # different rooms could corrupt the same day file.
+        key = ("__flat__", date_str) if self._flat_layout else (room_slug, date_str)
         with self._locks_lock:
             lock = self._locks.get(key)
             if lock is None:

@@ -373,3 +373,61 @@ def test_lock_cache_reuses_same_lock_for_same_key(tmp_path: Path) -> None:
     l3 = w._get_lock("other", "2026-05-26")  # noqa: SLF001
     assert l1 is l2
     assert l1 is not l3
+
+
+# ---------------------------------------------------------------------------
+# flat_layout — 1-on-1 bot mode
+# ---------------------------------------------------------------------------
+
+
+def _flat_section(event_id: str, body: str = "hi") -> Section:
+    return Section(
+        event_id=event_id,
+        timestamp=datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc),
+        sender="Matt",
+        kind="text",
+        stage="received",
+        fields={},
+        body=body,
+    )
+
+
+def test_flat_layout_writes_directly_under_vault_root(tmp_path: Path) -> None:
+    """In flat mode the day file lives at <vault>/<date>.md — no
+    per-room subfolder."""
+    w = VaultWriter(vault_root=tmp_path, flat_layout=True)
+    outcome = w.write_section(_flat_section("$a:srv"), room_slug="ignored")
+    assert outcome == WriteOutcome.APPENDED
+
+    day_files = list(tmp_path.glob("*.md"))
+    assert len(day_files) == 1
+    assert day_files[0].parent == tmp_path
+    subdirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert subdirs == []
+
+
+def test_flat_layout_collapses_two_rooms_to_one_file(tmp_path: Path) -> None:
+    w = VaultWriter(vault_root=tmp_path, flat_layout=True)
+    w.write_section(_flat_section("$a:srv", body="from room-a"), room_slug="room-a")
+    w.write_section(_flat_section("$b:srv", body="from room-b"), room_slug="room-b")
+
+    day_files = list(tmp_path.glob("*.md"))
+    assert len(day_files) == 1
+    text = day_files[0].read_text()
+    assert "from room-a" in text
+    assert "from room-b" in text
+
+
+def test_flat_layout_shares_lock_across_room_slugs(tmp_path: Path) -> None:
+    w = VaultWriter(vault_root=tmp_path, flat_layout=True)
+    l1 = w._get_lock("room-a", "2026-05-26")  # noqa: SLF001
+    l2 = w._get_lock("room-b", "2026-05-26")  # noqa: SLF001
+    assert l1 is l2
+
+
+def test_per_room_layout_unchanged_by_default(tmp_path: Path) -> None:
+    """Default flat_layout=False preserves per-room subfolders."""
+    w = VaultWriter(vault_root=tmp_path)
+    w.write_section(_flat_section("$a:srv"), room_slug="Matt-and-Annika")
+    assert (tmp_path / "Matt-and-Annika").is_dir()
+    assert list((tmp_path / "Matt-and-Annika").glob("*.md")) != []

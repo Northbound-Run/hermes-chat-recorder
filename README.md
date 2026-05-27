@@ -66,6 +66,11 @@ plugins:
     record_outbound: true
     timezone: America/Los_Angeles
 
+    # "group" (default) keeps the per-room subfolder layout. "1on1"
+    # assumes the bot only ever lives in a single DM and flattens to
+    # <vault_root>/<YYYY-MM-DD>.md — no per-room wrapper.
+    bot_type: "group"
+
     # Optional: manual name overrides. Useful when a Signal/WhatsApp
     # bridge user has no homeserver display name, or when you want to
     # rename a room. Overrides win over any automatic Matrix lookup.

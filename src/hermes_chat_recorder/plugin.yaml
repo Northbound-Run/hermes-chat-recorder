@@ -1,5 +1,5 @@
 name: chat_recorder
-version: 0.4.2
+version: 0.5.0
 description: "Record every Hermes Matrix chat message into a vault (text, voice transcripts, image descriptions). Pretty room/user names. STT and vision delegated to Hermes's built-in tools."
 author: Northbound
 license: MIT

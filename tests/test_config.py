@@ -148,6 +148,31 @@ def test_disabled_flag() -> None:
 
 
 # ---------------------------------------------------------------------------
+# bot_type — flat vs per-room layout
+# ---------------------------------------------------------------------------
+
+
+def test_bot_type_defaults_to_group() -> None:
+    cfg = load_config({"vault_root": "/x"}, env={})
+    assert cfg.bot_type == "group"
+
+
+def test_bot_type_1on1_accepted() -> None:
+    cfg = load_config({"vault_root": "/x", "bot_type": "1on1"}, env={})
+    assert cfg.bot_type == "1on1"
+
+
+def test_bot_type_case_and_whitespace_tolerant() -> None:
+    cfg = load_config({"vault_root": "/x", "bot_type": "  1ON1  "}, env={})
+    assert cfg.bot_type == "1on1"
+
+
+def test_bot_type_invalid_value_raises() -> None:
+    with pytest.raises(ConfigError, match="bot_type must be one of"):
+        load_config({"vault_root": "/x", "bot_type": "solo"}, env={})
+
+
+# ---------------------------------------------------------------------------
 # Manual name overrides
 # ---------------------------------------------------------------------------
 

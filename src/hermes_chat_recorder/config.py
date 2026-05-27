@@ -23,6 +23,12 @@ class RecorderConfig:
     record_outbound: bool = True
     timezone: str = "America/Los_Angeles"
 
+    # "group" (default) writes <vault_root>/<room-slug>/<YYYY-MM-DD>.md;
+    # "1on1" assumes the bot only ever lives in a single DM and flattens
+    # the layout to <vault_root>/<YYYY-MM-DD>.md, dropping the per-room
+    # subfolder entirely.
+    bot_type: str = "group"
+
     # Manual name overrides. Useful for bridge-puppet MXIDs (Signal,
     # WhatsApp) that never get a homeserver display name. The plugin
     # checks these before any Matrix lookup.
@@ -34,6 +40,8 @@ class RecorderConfig:
 
 _TRUTHY = {"true", "1", "yes", "on", "y", "t"}
 _FALSY = {"false", "0", "no", "off", "n", "f", ""}
+
+_VALID_BOT_TYPES = {"group", "1on1"}
 
 # Fields the config block used to accept that we now delegate to
 # Hermes. We accept them silently (don't fail readiness on old configs
@@ -137,6 +145,12 @@ def load_config(
     if not tz:
         raise ConfigError("timezone cannot be empty")
 
+    bot_type = str(_opt("bot_type", "group")).strip().lower()
+    if bot_type not in _VALID_BOT_TYPES:
+        raise ConfigError(
+            f"bot_type must be one of {sorted(_VALID_BOT_TYPES)}, got {bot_type!r}"
+        )
+
     for unsupported in ("record_image_bytes", "record_audio_bytes"):
         if unsupported in block:
             raise ConfigError(
@@ -161,6 +175,7 @@ def load_config(
         vault_root=vault_root,
         record_outbound=record_outbound,
         timezone=tz,
+        bot_type=bot_type,
         room_overrides=room_overrides,
         user_overrides=user_overrides,
         raw_block=block,
