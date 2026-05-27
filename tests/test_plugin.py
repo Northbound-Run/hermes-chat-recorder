@@ -145,7 +145,12 @@ class _FakeSyncAdapter:
     user_id: str = "@ralph:srv"
     sent: list = field(default_factory=list)
 
-    def send(self, chat_id: str, text: str, **kwargs):
+    def send(self, chat_id: str, content: str | None = None, **kwargs):
+        # Mirror Hermes's canonical signature (see
+        # gateway/platforms/matrix.py:929) — keyword `content` is the
+        # message body. Older tests still pass positional `(chat_id,
+        # text)`, which lands here as `(chat_id, content)`.
+        text = content or kwargs.get("text", "") or ""
         self.sent.append((chat_id, text))
         return _FakeSendResult(event_id=f"$outbound{len(self.sent)}:srv")
 
@@ -179,6 +184,34 @@ def test_on_session_start_binds_bot_mxid_and_wraps_send(tmp_path: Path) -> None:
     assert "<!-- event:$outbound1:srv -->" in content
     assert "stage:sent" in content
     assert "ack" in content
+
+
+def test_wrap_send_handles_hermes_kwarg_call_shape(tmp_path: Path) -> None:
+    """Regression: Hermes invokes ``send(chat_id=..., content=...,
+    reply_to=..., metadata=...)`` (see gateway/platforms/base.py:2485).
+    Earlier versions of our wrapper hardcoded ``text`` as a required
+    positional, so this call shape crashed with ``missing 1 required
+    positional argument: 'text'`` and the bot never delivered replies.
+    """
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    register(ctx)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+    adapter = _FakeSyncAdapter(user_id="@ralph:srv")
+    _fire_wiring(pre_dispatch, _build_gateway(adapter))
+
+    # Exact call shape Hermes uses — keyword args, with `content`, not `text`.
+    result = adapter.send(
+        chat_id="!room:srv",
+        content="hello from hermes",
+        reply_to=None,
+        metadata={"thread_id": "$t:srv"},
+    )
+    assert result.event_id  # didn't crash
+
+    md = next(tmp_path.rglob("*.md")).read_text()
+    assert "hello from hermes" in md
+    assert "stage:sent" in md
 
 
 def test_on_session_start_wrap_is_idempotent(tmp_path: Path) -> None:
@@ -249,7 +282,8 @@ class _FakeAsyncAdapter:
         self.user_id = "@ralph:srv"
         self.sent: list = []
 
-    async def send(self, chat_id: str, text: str, **kwargs):
+    async def send(self, chat_id: str, content: str | None = None, **kwargs):
+        text = content or kwargs.get("text", "") or ""
         self.sent.append((chat_id, text))
         return _FakeSendResult(event_id=f"$async{len(self.sent)}:srv")
 
@@ -309,7 +343,7 @@ class _SyncReturningCoroAdapter:
     def __init__(self) -> None:
         self.user_id = "@ralph:srv"
 
-    def send(self, chat_id: str, text: str, **_):  # type: ignore[no-untyped-def]
+    def send(self, chat_id: str, content: str | None = None, **_):  # type: ignore[no-untyped-def]
         async def _real_send():
             await asyncio.sleep(0.01)
             return _FakeSendResult(event_id="$bridged:srv")
@@ -343,7 +377,8 @@ class _AsyncDownloadAdapter:
         self.user_id = "@ralph:srv"
         self.send_calls: list = []
 
-    def send(self, chat_id, text, **_):
+    def send(self, chat_id, content=None, **kwargs):
+        text = content or kwargs.get("text", "") or ""
         self.send_calls.append((chat_id, text))
         return _FakeSendResult(event_id="$x")
 

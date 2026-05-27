@@ -410,6 +410,40 @@ def _resolve_download_callable(adapter: Any):
     return _sync_download
 
 
+def _extract_send_args(args: tuple, kwargs: dict) -> tuple[str, str]:
+    """Pull ``chat_id`` and the message body out of a ``send`` call.
+
+    Hermes's canonical signature is ``send(chat_id, content, reply_to,
+    metadata)`` and the gateway invokes it with keyword arguments
+    (gateway/platforms/base.py:2485). Older Hermes builds used
+    ``text`` instead of ``content``. We accept both kwarg names and
+    fall back to positional args so the wrapper works regardless of
+    how the caller binds the parameters.
+
+    Returns ``(chat_id, message_body)``. Either may be empty string
+    when the caller passes an unexpected shape; the recorder treats
+    empty values as "skip outbound recording" rather than crashing.
+    """
+    chat_id = ""
+    text = ""
+    if args:
+        if len(args) >= 1 and isinstance(args[0], str):
+            chat_id = args[0]
+        if len(args) >= 2 and isinstance(args[1], str):
+            text = args[1]
+    if not chat_id:
+        cid = kwargs.get("chat_id")
+        if isinstance(cid, str):
+            chat_id = cid
+    if not text:
+        for key in ("content", "text", "body", "message"):
+            val = kwargs.get(key)
+            if isinstance(val, str) and val:
+                text = val
+                break
+    return chat_id, text
+
+
 def _wrap_send(adapter: Any, recorder: Recorder) -> None:
     """Idempotently replace ``adapter.send`` with a wrapper that
     records outbound replies after a successful send.
@@ -435,14 +469,16 @@ def _wrap_send(adapter: Any, recorder: Recorder) -> None:
 
     if is_coro_fn:
 
-        async def wrapped(chat_id, text, *args, **kwargs):
-            result = await original_send(chat_id, text, *args, **kwargs)
+        async def wrapped(*args, **kwargs):
+            chat_id, text = _extract_send_args(args, kwargs)
+            result = await original_send(*args, **kwargs)
             _record_outbound(recorder, adapter, chat_id, text, result, bot_mxid)
             return result
     else:
 
-        def wrapped(chat_id, text, *args, **kwargs):  # type: ignore[misc]
-            result = original_send(chat_id, text, *args, **kwargs)
+        def wrapped(*args, **kwargs):  # type: ignore[misc]
+            chat_id, text = _extract_send_args(args, kwargs)
+            result = original_send(*args, **kwargs)
             # Some adapter decorators present a sync surface but return
             # a coroutine. If we record on the coroutine object the
             # event_id is missing and the recorded "send" might never
