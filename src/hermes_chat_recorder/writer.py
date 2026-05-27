@@ -216,11 +216,22 @@ class VaultWriter:
 
     def has_event(self, event_id: str, room_slug: str, timestamp: datetime) -> bool:
         """Return True if a section for this event_id already exists in
-        the appropriate day file. Useful for sync-replay short-circuit."""
+        the appropriate day file. Useful for sync-replay short-circuit.
+
+        Acquires the same per-(slug, date) lock that ``write_section``
+        uses so concurrent writers can't tear a half-rendered section
+        underneath us — otherwise a write in flight could be observed
+        as "no anchor", the caller would re-record, and we'd end up
+        with the same event written twice.
+        """
         day_file = self.day_file_path(room_slug, timestamp)
-        if not day_file.exists():
-            return False
-        return _anchor(event_id) in day_file.read_text(encoding="utf-8")
+        local_ts = self._localize(timestamp)
+        date_str = local_ts.strftime("%Y-%m-%d")
+        lock = self._get_lock(room_slug, date_str)
+        with lock:
+            if not day_file.exists():
+                return False
+            return _anchor(event_id) in day_file.read_text(encoding="utf-8")
 
     # ------------------------------------------------------------------
     # internal helpers

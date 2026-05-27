@@ -43,6 +43,13 @@ class MatrixEventInfo:
     duration_sec: int | None = None
     mentioned_mxids: frozenset[str] = frozenset()
     is_reaction: bool = False
+    # Matrix edits arrive as their own event with an ``m.relates_to``
+    # block whose ``rel_type`` is ``m.replace``. When this event IS an
+    # edit, ``is_edit`` is True and ``replaced_event_id`` points back
+    # at the original message; ``body`` contains the new content
+    # (stripped of the ``* `` fallback prefix Matrix clients add).
+    is_edit: bool = False
+    replaced_event_id: str | None = None
 
 
 # Hermes's ``MessageType`` enum ships various flavours; map to ours.
@@ -228,6 +235,8 @@ def extract(event: Any) -> MatrixEventInfo | None:
 
     mxc_url, mime, duration_sec = _extract_mxc_and_media(raw, kind)
     local_media_path = _extract_local_media_path(event, kind)
+    is_edit, replaced_event_id, edited_body = _extract_edit_relation(raw)
+    body = edited_body or str(_get(event, "text", default="") or "")
     return MatrixEventInfo(
         event_id=str(event_id),
         room_id=str(chat_id),
@@ -235,14 +244,55 @@ def extract(event: Any) -> MatrixEventInfo | None:
         sender_display=_extract_sender_display(raw, fallback=str(user_id)),
         timestamp=_extract_timestamp(raw),
         kind=kind,
-        body=str(_get(event, "text", default="") or ""),
+        body=body,
         mxc_url=mxc_url,
         local_media_path=local_media_path,
         mime=mime,
         duration_sec=duration_sec,
         mentioned_mxids=_extract_mentions(raw),
         is_reaction=False,
+        is_edit=is_edit,
+        replaced_event_id=replaced_event_id,
     )
+
+
+def _extract_edit_relation(raw_message: Any) -> tuple[bool, str | None, str | None]:
+    """Detect a Matrix edit (m.replace) on the raw event.
+
+    Returns ``(is_edit, replaced_event_id, new_body)``. Matrix's edit
+    convention puts the new content under ``content.m.new_content`` and
+    flags the relationship via ``content.m.relates_to`` with
+    ``rel_type == "m.replace"``. The top-level ``content.body`` also
+    carries the new body but with a ``"* "`` fallback prefix that
+    legacy clients show — we prefer ``m.new_content.body`` when it's
+    present, falling back to a stripped ``content.body`` otherwise.
+    """
+    content = _get(raw_message, "content")
+    if content is None:
+        return False, None, None
+    relates = _get(content, "m.relates_to", "relates_to")
+    if not isinstance(relates, dict):
+        return False, None, None
+    rel_type = relates.get("rel_type") or relates.get("relType")
+    if str(rel_type) != "m.replace":
+        return False, None, None
+    target = relates.get("event_id") or relates.get("eventId")
+    if not isinstance(target, str) or not target:
+        return False, None, None
+
+    new_body: str | None = None
+    new_content = _get(content, "m.new_content", "new_content")
+    if isinstance(new_content, dict):
+        candidate = new_content.get("body")
+        if isinstance(candidate, str) and candidate:
+            new_body = candidate
+    if new_body is None:
+        # Fallback: strip the "* " fallback prefix off content.body.
+        candidate = _get(content, "body")
+        if isinstance(candidate, str) and candidate:
+            new_body = candidate[2:] if candidate.startswith("* ") else candidate
+
+    return True, target, new_body
 
 
 def _extract_local_media_path(event: Any, kind: MessageKind) -> str | None:

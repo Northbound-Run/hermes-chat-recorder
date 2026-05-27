@@ -441,3 +441,90 @@ def test_sender_display_uses_raw_displayname() -> None:
 )
 def test_room_slug_derivation(rid: str, expected: str) -> None:
     assert room_slug_from_room_id(rid) == expected
+
+
+# ---------------------------------------------------------------------------
+# Edit detection — m.replace relations
+# ---------------------------------------------------------------------------
+
+
+def _edit_event(
+    *,
+    new_body: str,
+    target_event_id: str = "$orig:srv",
+    fallback_body: str = "* edited fallback",
+    use_new_content: bool = True,
+):
+    """Helper: synthesize a Matrix edit event in the shape mautrix delivers."""
+    content: dict[str, Any] = {
+        "body": fallback_body,
+        "m.relates_to": {
+            "rel_type": "m.replace",
+            "event_id": target_event_id,
+        },
+    }
+    if use_new_content:
+        content["m.new_content"] = {"body": new_body}
+    return SimpleNamespace(
+        text="",
+        message_id="$edit:srv",
+        message_type=_msg_type("TEXT"),
+        source=_src(),
+        raw_message=_raw(content=content),
+    )
+
+
+def test_edit_event_flagged_with_new_body() -> None:
+    event = _edit_event(new_body="here is the corrected text")
+    info = extract(event)
+    assert info is not None
+    assert info.is_edit is True
+    assert info.replaced_event_id == "$orig:srv"
+    assert info.body == "here is the corrected text"
+
+
+def test_edit_event_falls_back_to_stripped_body_prefix_when_new_content_missing() -> None:
+    """Older Matrix clients omit m.new_content. We then read content.body
+    and strip the leading "* " fallback prefix."""
+    event = _edit_event(
+        new_body="ignored",
+        fallback_body="* second-try wording",
+        use_new_content=False,
+    )
+    info = extract(event)
+    assert info is not None
+    assert info.is_edit is True
+    assert info.body == "second-try wording"
+
+
+def test_non_edit_event_is_not_flagged() -> None:
+    event = SimpleNamespace(
+        text="just a plain message",
+        message_id="$plain:srv",
+        message_type=_msg_type("TEXT"),
+        source=_src(),
+        raw_message=_raw(content={"body": "just a plain message"}),
+    )
+    info = extract(event)
+    assert info is not None
+    assert info.is_edit is False
+    assert info.replaced_event_id is None
+
+
+def test_edit_event_with_non_replace_rel_type_is_not_flagged() -> None:
+    """Threaded replies use ``m.thread``; they must NOT be treated as edits."""
+    event = SimpleNamespace(
+        text="threaded reply",
+        message_id="$thread:srv",
+        message_type=_msg_type("TEXT"),
+        source=_src(),
+        raw_message=_raw(
+            content={
+                "body": "threaded reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root:srv"},
+            }
+        ),
+    )
+    info = extract(event)
+    assert info is not None
+    assert info.is_edit is False

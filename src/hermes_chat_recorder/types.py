@@ -19,6 +19,7 @@ Stage = Literal[
     "transcribe_failed",
     "describe_failed",
     "sent",
+    "edited",
 ]
 
 # Logical kind of a Matrix message — picked so the gate and writer don't
@@ -29,7 +30,7 @@ MessageKind = Literal["text", "voice", "image", "reply"]
 # Stages whose sections should NOT be replaced once written, except by
 # the SAME stage (in which case the write is a no-op).
 TERMINAL_STAGES: frozenset[str] = frozenset(
-    {"transcribed", "described", "transcribe_failed", "describe_failed", "sent"}
+    {"transcribed", "described", "transcribe_failed", "describe_failed", "sent", "edited"}
 )
 
 

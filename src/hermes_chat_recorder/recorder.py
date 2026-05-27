@@ -1,22 +1,23 @@
 """Recorder — orchestrates writer, transcriber, describer.
 
 The Recorder owns the per-process state (writer + lazy-init'd
-transcriber and describer) and provides the two callbacks Hermes binds
-into:
+transcriber and describer) and provides the single callback Hermes
+binds into:
 
 * :meth:`Recorder.on_pre_gateway_dispatch` — sync callback wired to the
-  ``pre_gateway_dispatch`` plugin hook. **Records every inbound Matrix
-  message to the vault**. For voice/image events it transcribes /
+  ``pre_gateway_dispatch`` plugin hook. Records every inbound Matrix
+  message to the vault. For voice/image events it transcribes /
   describes the media and rewrites ``event.text`` so the agent has
   usable content. It does NOT make wake decisions — whether the agent
   replies is governed by Hermes's native settings (e.g.
   ``MATRIX_REQUIRE_MENTION``).
-* :meth:`Recorder.on_session_start` — sync callback wired to
-  ``on_session_start``. Locates the live Matrix adapter, captures a
-  download-media handle, and wraps the adapter's ``send`` so outbound
-  replies also land in the vault.
 
-See ``docs/DESIGN.md`` for the storage format and concurrency model.
+On the first ``pre_gateway_dispatch`` the recorder also fires its
+one-shot ``wire_gateway_once`` callback. That binding is how the
+plugin reaches the live Matrix adapter — Hermes's ``on_session_start``
+hook doesn't receive the gateway, so adapter wiring can't happen
+there. See ``docs/DESIGN.md`` for the storage format and concurrency
+model.
 """
 
 from __future__ import annotations
@@ -170,6 +171,13 @@ class Recorder:
         # Sync-replay duplicate — already in the vault. Don't double-
         # record and don't fight Hermes's own dedupe.
         if self.writer.has_event(info.event_id, room_slug, info.timestamp):
+            return None
+
+        # Edits get their own section linked back to the original.
+        # We intentionally don't go through the placeholder/terminal
+        # two-step here — edits ARE terminal as soon as they land.
+        if info.is_edit:
+            self._write_edit(info, room_slug)
             return None
 
         # 1) Persist a placeholder so the event is durable even if
@@ -437,6 +445,33 @@ class Recorder:
         body = "\n".join(body_parts) if body_parts else "(empty description)"
         self._write_terminal(info, room_slug, stage="described", body=body)
         return result.description, result.text, True
+
+    def _write_edit(self, info: MatrixEventInfo, room_slug: str) -> None:
+        """Append a section for an ``m.replace`` edit event.
+
+        The edit has its own (new) event_id, so it gets its own
+        section anchor. The ``edits:`` field points back at the
+        original message so a reader can scan upward to find what was
+        being changed. We don't try to mutate the original section in
+        place — the vault is a historical record, and Matrix itself
+        keeps every edit as a distinct event on the wire.
+        """
+        fields: dict[str, str] = {}
+        if info.replaced_event_id:
+            fields["edits"] = info.replaced_event_id
+        section = Section(
+            event_id=info.event_id,
+            timestamp=info.timestamp,
+            sender=self._best_display(info.sender_display, info.sender_mxid),
+            kind="text",
+            stage="edited",
+            fields=fields,
+            body=info.body or "(edited message body empty)",
+        )
+        try:
+            self.writer.write_section(section, room_slug=room_slug)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes_chat_recorder: edit write failed: %s", exc)
 
     def _write_terminal(
         self,

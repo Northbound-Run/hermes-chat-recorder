@@ -507,6 +507,43 @@ def test_outbound_respects_explicit_friendly_sender(tmp_path: Path) -> None:
     assert "Resolver Result" not in content
 
 
+def test_edit_event_writes_edited_section_linked_to_original(tmp_path: Path) -> None:
+    """Matrix m.replace events get their own anchor, link back to the
+    original via the ``edits:`` field, and use stage:edited."""
+    r = _build_recorder(tmp_path)
+    edit_event = SimpleNamespace(
+        text="",  # edit events deliver new body via content.m.new_content
+        message_id="$edit:srv",
+        message_type=_matrix_msg_type("TEXT"),
+        source=SimpleNamespace(
+            platform=SimpleNamespace(value="matrix"),
+            chat_id=ROOM,
+            user_id=ANNIKA,
+        ),
+        raw_message=SimpleNamespace(
+            origin_server_ts=1716729240000,
+            content={
+                "body": "* corrected wording",
+                "m.new_content": {"body": "corrected wording"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$original:srv",
+                },
+            },
+        ),
+    )
+    result = r.on_pre_gateway_dispatch(event=edit_event)
+    # Edits don't rewrite event.text — let Hermes deliver the new body
+    # as-is and the agent can re-evaluate if it cares.
+    assert result is None
+
+    content = next(tmp_path.rglob("*.md")).read_text()
+    assert "<!-- event:$edit:srv -->" in content
+    assert "stage:edited" in content
+    assert "**edits:** $original:srv" in content
+    assert "corrected wording" in content
+
+
 def test_lazy_gateway_wire_fires_on_first_dispatch_only(tmp_path: Path) -> None:
     """The wiring callback fires exactly once — on the first
     pre_gateway_dispatch with a gateway. Subsequent dispatches don't

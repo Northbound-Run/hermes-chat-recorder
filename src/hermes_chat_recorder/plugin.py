@@ -465,14 +465,17 @@ def _wrap_send(adapter: Any, recorder: Recorder) -> None:
     import inspect
 
     is_coro_fn = inspect.iscoroutinefunction(original_send)
-    bot_mxid = recorder.bot_mxid
 
+    # NB: don't capture ``recorder.bot_mxid`` here — it's resolved
+    # lazily during adapter wiring AND can be re-set later if the
+    # initial lookup failed. Read it at call time so outbound sections
+    # always get the freshest value.
     if is_coro_fn:
 
         async def wrapped(*args, **kwargs):
             chat_id, text = _extract_send_args(args, kwargs)
             result = await original_send(*args, **kwargs)
-            _record_outbound(recorder, adapter, chat_id, text, result, bot_mxid)
+            _record_outbound(recorder, adapter, chat_id, text, result, recorder.bot_mxid)
             return result
     else:
 
@@ -488,7 +491,7 @@ def _wrap_send(adapter: Any, recorder: Recorder) -> None:
                 from hermes_chat_recorder._background_loop import get_background_loop
 
                 result = get_background_loop().run_coro_sync(result)
-            _record_outbound(recorder, adapter, chat_id, text, result, bot_mxid)
+            _record_outbound(recorder, adapter, chat_id, text, result, recorder.bot_mxid)
             return result
 
     adapter.send = wrapped  # type: ignore[assignment]
