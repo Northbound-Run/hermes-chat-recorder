@@ -200,9 +200,26 @@ def _wire_matrix_adapter(recorder: Recorder, **kwargs: Any) -> None:
 
 
 def _find_matrix_adapter(gateway: Any) -> Any | None:
+    """Locate the Matrix adapter on the gateway.
+
+    Hermes's ``GatewayRunner.adapters`` is a ``Dict[Platform, BasePlatformAdapter]``
+    — keyed by the Platform enum, NOT by string. We can't ``.get("matrix")``;
+    we have to iterate, normalize the platform key to its ``.value``
+    (which is the string ``"matrix"``), and match on that. Also accept
+    list/tuple shapes for defensiveness in case the upstream type changes.
+    """
     adapters = getattr(gateway, "adapters", None)
     if isinstance(adapters, dict):
-        return adapters.get("matrix") or adapters.get("Matrix")
+        # String-keyed fallback (test ctx, future API).
+        for key in ("matrix", "Matrix"):
+            if key in adapters:
+                return adapters[key]
+        # Enum-keyed real path.
+        for platform_key, adapter in adapters.items():
+            value = getattr(platform_key, "value", None) or str(platform_key)
+            if str(value).lower() == "matrix":
+                return adapter
+        return None
     if isinstance(adapters, (list, tuple)):
         for a in adapters:
             platform = getattr(a, "platform", None) or getattr(a, "name", None)

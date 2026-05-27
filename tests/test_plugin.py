@@ -428,6 +428,34 @@ def test_name_resolver_falls_back_to_dm_peer_when_room_name_missing(
     assert recorder.resolver.room_slug("!dmroom:srv") == "Matt-Hall"
 
 
+def test_finds_matrix_adapter_when_adapters_dict_keyed_by_enum(tmp_path: Path) -> None:
+    """Hermes's GatewayRunner.adapters is Dict[Platform, BasePlatformAdapter]
+    — keyed by enum, not string. Our finder must locate the adapter via
+    ``.platform.value == 'matrix'`` rather than dict-string lookup."""
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    recorder = register(ctx)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+
+    # Simulate a Platform enum member.
+    class _PlatformEnum:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    matrix_platform = _PlatformEnum("matrix")
+    adapter = _FakeSyncAdapter()
+    gateway = SimpleNamespace(adapters={matrix_platform: adapter})
+
+    _fire_wiring(pre_dispatch, gateway)
+
+    # If the lookup found the adapter, send was wrapped — verify by
+    # firing send and checking the vault gets the outbound section.
+    adapter.send("!room:srv", "ack")
+    content = next(tmp_path.rglob("*.md")).read_text()
+    assert "ack" in content
+    assert "stage:sent" in content
+
+
 def test_name_resolver_safe_when_adapter_has_no_client(tmp_path: Path) -> None:
     """No client → resolver keeps its default fallbacks (slug-from-id,
     MXID localpart). No exception."""
