@@ -204,13 +204,53 @@ def test_unknown_message_type_returns_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_missing_message_id_returns_none() -> None:
-    assert extract(_event(message_id="")) is None
-
-
 def test_missing_chat_or_user_returns_none() -> None:
     assert extract(_event(chat_id="")) is None
     assert extract(_event(user_id="")) is None
+
+
+# ---------------------------------------------------------------------------
+# Synthesized event IDs — adapters that never set message_id (Signal)
+# ---------------------------------------------------------------------------
+
+
+def _signal_event(text: str = "velociraptor", ts_ms: int = 1718136462885) -> Any:
+    """Signal-shaped event: NO message_id; raw carries sender+timestamp_ms
+    (exactly what Hermes's Signal adapter dispatches)."""
+    return SimpleNamespace(
+        text=text,
+        message_id=None,
+        message_type=_msg_type("TEXT"),
+        source=SimpleNamespace(
+            platform=SimpleNamespace(value="signal"),
+            chat_id="group:Wup95ApO=",
+            user_id="2c991545-6e87-49d1-83fd-8d99fc538761",
+            chat_name=None,
+            chat_type="group",
+            user_name="Matthew",
+        ),
+        media_urls=[],
+        raw_message={"sender": "2c991545-6e87-49d1-83fd-8d99fc538761", "timestamp_ms": ts_ms},
+        timestamp=datetime(2026, 6, 11, 20, 27, 42, tzinfo=timezone.utc),
+    )
+
+
+def test_missing_message_id_synthesizes_stable_id() -> None:
+    info = extract(_signal_event())
+    assert info is not None
+    assert info.event_id == "syn:2c991545-6e87-49d1-83fd-8d99fc538761:1718136462885"
+    # Redelivery of the same message produces the same ID — the vault
+    # anchor dedupes exactly like a real message ID would.
+    again = extract(_signal_event())
+    assert again is not None
+    assert again.event_id == info.event_id
+
+
+def test_synthesized_id_falls_back_to_event_timestamp() -> None:
+    event = _event(message_id="", timestamp=datetime(2026, 6, 11, 20, 0, 0, tzinfo=timezone.utc))
+    info = extract(event)
+    assert info is not None
+    assert info.event_id == f"syn:5551212:{int(info.timestamp.timestamp() * 1000)}"
 
 
 # ---------------------------------------------------------------------------

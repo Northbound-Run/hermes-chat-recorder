@@ -188,11 +188,32 @@ def _extract_reply_to(event: Any) -> str | None:
     return None
 
 
+def _synthesize_event_id(sender_id: str, raw_message: Any, timestamp: Any) -> str:
+    """Build a stable event ID for adapters that don't set message_id.
+
+    Prefers the platform's own millisecond timestamp off the raw
+    payload (Signal ships ``timestamp_ms``; the value IS the protocol's
+    message identity together with the sender), falling back to the
+    extracted event timestamp. Both are redelivery-stable, so the vault
+    anchor dedupes replays exactly like a real message ID would. The
+    ``syn:`` prefix keeps synthesized anchors greppable.
+    """
+    ts_ms = _get(raw_message, "timestamp_ms", "origin_server_ts")
+    millis = (
+        int(ts_ms)
+        if isinstance(ts_ms, (int, float))
+        else int(timestamp.timestamp() * 1000)
+    )
+    return f"syn:{sender_id}:{millis}"
+
+
 def extract(event: Any) -> EventInfo | None:
     """Pull a normalized :class:`EventInfo` off a Hermes ``MessageEvent``.
 
     Returns ``None`` when the event can't be recorded (no platform, no
-    message id, unsupported message type, …). The recorder uses
+    chat/sender, unsupported message type, …). A missing ``message_id``
+    is NOT fatal — some adapters (Signal) never set one, so a stable ID
+    is synthesized from sender + timestamp instead. The recorder uses
     ``None`` as the signal to bail out early without touching the
     vault.
     """
@@ -226,15 +247,22 @@ def extract(event: Any) -> EventInfo | None:
         )
         return None
 
-    event_id = _get(event, "message_id")
-    if not event_id:
-        return None
     chat_id = _get(source, "chat_id")
     user_id = _get(source, "user_id")
     if not chat_id or not user_id:
         return None
 
     sender_id = str(user_id)
+    timestamp = _extract_timestamp(event, raw, platform)
+    event_id = _get(event, "message_id")
+    if not event_id:
+        # Some adapters never set message_id — Signal, for one,
+        # identifies a message by (sender, timestamp_ms) and ships
+        # exactly those in raw_message. Synthesize a stable ID from the
+        # same attributes so redelivery still dedupes against the
+        # existing vault anchor.
+        event_id = _synthesize_event_id(sender_id, raw, timestamp)
+
     sender_display = _get(source, "user_name", default="") or ""
     chat_name = _get(source, "chat_name", default="") or ""
     chat_type = str(_get(source, "chat_type", default="") or "")
@@ -248,7 +276,7 @@ def extract(event: Any) -> EventInfo | None:
         chat_id=str(chat_id),
         sender_id=sender_id,
         sender_display=str(sender_display) or sender_id,
-        timestamp=_extract_timestamp(event, raw, platform),
+        timestamp=timestamp,
         kind=kind,
         body=body,
         chat_name=str(chat_name),

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-chat-recorder"
-version = "0.7.0"
+version = "0.7.1"
 description = "Hermes Agent plugin that records every gateway chat message — any platform — to an Obsidian-style Markdown vault, with voice transcripts and image descriptions."
 readme = "README.md"
 requires-python = ">=3.10"

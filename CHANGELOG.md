@@ -5,6 +5,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/)
 (pre-1.0: minor bumps may break).
 
+## [0.7.1] — 2026-06-11
+
+### Fixed
+- **Signal messages were not recorded at all**: Hermes's Signal adapter
+  never sets `MessageEvent.message_id` (the protocol identifies a
+  message by sender + timestamp), and the extractor treated a missing
+  ID as unrecordable. A stable ID is now synthesized from the sender
+  and the platform's millisecond timestamp (`syn:<sender>:<ts_ms>`),
+  preserving redelivery dedupe. Applies to any adapter that omits
+  `message_id`.
+
 ## [0.7.0] — 2026-06-11
 
 First public release.
