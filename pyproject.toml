@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=68", "setuptools-scm>=8"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-chat-recorder"
-version = "0.6.0"
-description = "Record every Hermes Matrix chat message (text, voice, image) to an Obsidian-style vault."
+version = "0.7.0"
+description = "Hermes Agent plugin that records every gateway chat message — any platform — to an Obsidian-style Markdown vault, with voice transcripts and image descriptions."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -16,8 +16,11 @@ keywords = [
     "hermes",
     "hermes-agent",
     "matrix",
+    "telegram",
+    "discord",
     "obsidian",
     "transcript",
+    "chat-archive",
     "voice-transcription",
     "image-description",
     "chatbot",
@@ -32,6 +35,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Chat",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: Office/Business",
@@ -72,7 +76,7 @@ chat_recorder = "hermes_chat_recorder"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hermes_chat_recorder = ["plugin.yaml"]
+hermes_chat_recorder = ["plugin.yaml", "py.typed"]
 
 [tool.ruff]
 line-length = 100

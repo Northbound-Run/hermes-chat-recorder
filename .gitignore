@@ -56,3 +56,6 @@ coverage.xml
 # Local notes (work-in-progress design docs)
 TODO.local.md
 NOTES.local.md
+
+# oh-my-claudecode session state
+.omc/

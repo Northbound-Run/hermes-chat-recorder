@@ -19,15 +19,17 @@ need to talk to each other can do so naturally.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
-from typing import Any, Awaitable, TypeVar
+from collections.abc import Awaitable
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_instance: "BackgroundLoop | None" = None
+_instance: BackgroundLoop | None = None
 _singleton_lock = threading.Lock()
 
 
@@ -48,10 +50,8 @@ class BackgroundLoop:
         except Exception:  # pragma: no cover - daemon thread, log + crash
             logger.exception("hermes_chat_recorder background loop crashed")
         finally:
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover
                 self._loop.close()
-            except Exception:  # pragma: no cover
-                pass
 
     def run_coro_sync(self, coro: Awaitable[T], *, timeout: float = 120.0) -> T:
         """Run an awaitable on the background loop, block for the result.

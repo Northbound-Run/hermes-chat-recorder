@@ -5,19 +5,19 @@ transcriber and describer) and provides the single callback Hermes
 binds into:
 
 * :meth:`Recorder.on_pre_gateway_dispatch` — sync callback wired to the
-  ``pre_gateway_dispatch`` plugin hook. Records every inbound Matrix
-  message to the vault. For voice/image events it transcribes /
-  describes the media and rewrites ``event.text`` so the agent has
-  usable content. It does NOT make wake decisions — whether the agent
-  replies is governed by Hermes's native settings (e.g.
-  ``MATRIX_REQUIRE_MENTION``).
+  ``pre_gateway_dispatch`` plugin hook. Records every inbound gateway
+  message (any platform) to the vault. For voice/image events it
+  transcribes / describes the media and rewrites ``event.text`` so the
+  agent has usable content. It does NOT make wake decisions — whether
+  the agent replies is governed by Hermes's native settings (mention
+  gating, allowed users, etc.).
 
 On the first ``pre_gateway_dispatch`` the recorder also fires its
 one-shot ``wire_gateway_once`` callback. That binding is how the
-plugin reaches the live Matrix adapter — Hermes's ``on_session_start``
-hook doesn't receive the gateway, so adapter wiring can't happen
-there. See ``docs/DESIGN.md`` for the storage format and concurrency
-model.
+plugin reaches the live platform adapters (to wrap ``send`` for
+outbound recording) — Hermes's ``on_session_start`` hook doesn't
+receive the gateway, so adapter wiring can't happen there. See
+``docs/DESIGN.md`` for the storage format and concurrency model.
 """
 
 from __future__ import annotations
@@ -28,13 +28,9 @@ from typing import Any
 
 from hermes_chat_recorder.config import RecorderConfig
 from hermes_chat_recorder.describer import ImageDescriber, ImageDescriberError
-from hermes_chat_recorder.matrix_event import (
-    MatrixEventInfo,
-)
-from hermes_chat_recorder.matrix_event import (
-    extract as extract_matrix_event,
-)
-from hermes_chat_recorder.name_resolver import NameResolver
+from hermes_chat_recorder.events import EventInfo
+from hermes_chat_recorder.events import extract as extract_event
+from hermes_chat_recorder.name_resolver import NameResolver, looks_like_id
 from hermes_chat_recorder.transcriber import Transcriber, TranscriberError
 from hermes_chat_recorder.types import Section
 from hermes_chat_recorder.writer import VaultWriter
@@ -42,19 +38,15 @@ from hermes_chat_recorder.writer import VaultWriter
 logger = logging.getLogger(__name__)
 
 
-# Type alias for the media-download callable. Plugin.py binds this to
-# the live Matrix adapter's media-download method. None means "skip
-# media processing this turn" — sections stay at stage:received.
+# Type alias for the media-download callable. plugin.py binds this to
+# the live Matrix adapter's media-download method as a legacy fallback;
+# the primary media source is the adapter-cached local file on the
+# event itself. None means "no fallback available".
 DownloadMedia = Callable[[str], bytes]
 
 
-def _looks_like_mxid(s: str) -> bool:
-    """Heuristic for ``@localpart:server`` shaped strings."""
-    return s.startswith("@") and ":" in s
-
-
 class Recorder:
-    """Records every Matrix message to the vault.
+    """Records every gateway message to the vault.
 
     The recorder is intentionally NOT a gate. It writes everything it
     sees and lets Hermes's native settings decide whether the agent
@@ -77,9 +69,9 @@ class Recorder:
     ) -> None:
         self.config = config
         self.writer = writer
-        # Resolver defaults to a bare instance with no lookups wired —
-        # falls back to room_slug_from_room_id / MXID localpart until
-        # the gateway-wiring callback (below) plumbs the live Matrix
+        # Resolver defaults to a bare instance with no Matrix lookups
+        # wired — per-event hints and ID-derived fallbacks still work.
+        # The gateway-wiring callback (below) plumbs the live Matrix
         # client through on the first pre_gateway_dispatch.
         self.resolver = resolver if resolver is not None else NameResolver()
         self._transcriber = transcriber
@@ -87,15 +79,15 @@ class Recorder:
         self.bot_mxid = bot_mxid
         self._download_media = download_media
         # Hermes's ``on_session_start`` hook only receives ``session_id``
-        # — not the gateway — so we can't reach the live Matrix adapter
-        # from there. Instead, wire the adapter lazily on the first
+        # — not the gateway — so we can't reach the live adapters from
+        # there. Instead, wire them lazily on the first
         # ``pre_gateway_dispatch`` invocation (which DOES receive
-        # ``gateway=self``, see gateway/run.py:5805 in Hermes).
+        # ``gateway=self`` from Hermes's gateway/run.py).
         self._wire_gateway_once = wire_gateway_once
         self._gateway_wired = False
 
     # ------------------------------------------------------------------
-    # Wiring helpers used by plugin.py at on_session_start time
+    # Wiring helpers used by plugin.py at adapter-wiring time
     # ------------------------------------------------------------------
 
     def set_bot_mxid(self, mxid: str) -> None:
@@ -135,9 +127,17 @@ class Recorder:
     # ------------------------------------------------------------------
 
     def on_pre_gateway_dispatch(
-        self, *, event: Any, gateway: Any = None, session_store: Any = None
+        self,
+        *,
+        event: Any,
+        gateway: Any = None,
+        session_store: Any = None,
+        **kwargs: Any,
     ) -> dict | None:
         """Sync callback invoked by Hermes per inbound message.
+
+        Accepts ``**kwargs`` so future Hermes versions can add hook
+        arguments without breaking us.
 
         Returns:
             * ``None`` — let the gateway dispatch normally (the default
@@ -153,47 +153,56 @@ class Recorder:
         self._maybe_wire_gateway(gateway)
 
         try:
-            info = extract_matrix_event(event)
+            info = extract_event(event)
         except Exception as exc:
             logger.warning("hermes_chat_recorder: extract failed: %s", exc)
             return None
 
         if info is None:
-            # Not a Matrix message we know how to handle.
+            # Not a message we know how to record.
+            return None
+
+        if self.config.platforms and info.platform not in self.config.platforms:
+            # Operator restricted recording to specific platforms.
             return None
 
         if info.is_reaction:
             # Reactions don't get recorded.
             return None
 
-        room_slug = self.resolver.room_slug(info.room_id)
+        path_slug = self._path_slug(info)
 
         # Sync-replay duplicate — already in the vault. Don't double-
         # record and don't fight Hermes's own dedupe.
-        if self.writer.has_event(info.event_id, room_slug, info.timestamp):
+        if self.writer.has_event(info.event_id, path_slug, info.timestamp):
             return None
 
         # Edits get their own section linked back to the original.
         # We intentionally don't go through the placeholder/terminal
         # two-step here — edits ARE terminal as soon as they land.
         if info.is_edit:
-            self._write_edit(info, room_slug)
+            self._write_edit(info, path_slug)
+            return None
+
+        # Kinds with no processing pipeline are terminal immediately.
+        if info.kind in ("video", "file", "location"):
+            self._write_unprocessed(info, path_slug)
             return None
 
         # 1) Persist a placeholder so the event is durable even if
         #    downstream processing crashes.
-        if not self._write_placeholder(info, room_slug):
+        if not self._write_placeholder(info, path_slug):
             logger.error(
                 "hermes_chat_recorder: vault placeholder write failed for "
                 "event %s in %s; passing through unmodified",
                 info.event_id,
-                room_slug,
+                path_slug,
             )
             return None
 
         # 2) Process media → write terminal stage section.
         if info.kind == "voice":
-            transcript, ok = self._process_voice(info, room_slug)
+            transcript, ok = self._process_voice(info, path_slug)
             if ok and transcript:
                 return {"action": "rewrite", "text": transcript}
             # Failed: rewrite to a placeholder so the agent sees SOMETHING
@@ -204,7 +213,7 @@ class Recorder:
             }
 
         if info.kind == "image":
-            description, ocr_text, ok = self._process_image(info, room_slug)
+            description, ocr_text, ok = self._process_image(info, path_slug)
             if ok and (description or ocr_text):
                 return {
                     "action": "rewrite",
@@ -224,21 +233,23 @@ class Recorder:
     def record_outbound(
         self,
         *,
-        room_id: str,
-        sender_display: str,
+        platform: str,
+        chat_id: str,
         text: str,
         event_id: str,
         timestamp: Any,
+        sender_display: str = "",
         reply_to_event_id: str | None = None,
     ) -> None:
         """Record the bot's own reply to the vault."""
         if not self.config.record_outbound:
             return
-        room_slug = self.resolver.room_slug(room_id)
-        # If the caller passed something MXID-shaped (or empty), let the
-        # resolver pick a friendlier display name; otherwise honor the
-        # explicit string the caller supplied.
-        sender = self._best_display(sender_display, self.bot_mxid) or "bot"
+        if self.config.platforms and platform not in self.config.platforms:
+            return
+        path_slug = self._compose_slug(
+            platform, self.resolver.chat_slug(platform, chat_id)
+        )
+        sender = self._bot_display(platform, sender_display)
         fields: dict[str, str] = {}
         if reply_to_event_id:
             fields["reply_to"] = reply_to_event_id
@@ -252,7 +263,7 @@ class Recorder:
             body=text or "",
         )
         try:
-            self.writer.write_section(section, room_slug=room_slug)
+            self.writer.write_section(section, path_slug=path_slug)
         except Exception as exc:
             logger.warning("hermes_chat_recorder: outbound write failed: %s", exc)
 
@@ -260,97 +271,168 @@ class Recorder:
     # internals
     # ------------------------------------------------------------------
 
-    def _write_placeholder(self, info: MatrixEventInfo, room_slug: str) -> bool:
+    def _path_slug(self, info: EventInfo) -> str:
+        """Compose the vault path segment for an event's chat.
+
+        Group layout: ``<platform>/<chat-slug>`` — the platform folder
+        keeps chat IDs from different platforms from ever colliding.
+        Flat (1on1) layout ignores the slug entirely, so the value is
+        only used for lock scoping there.
+        """
+        # Only unnamed DMs may borrow the sender's display name for the
+        # chat folder; a group chat must never be named after whoever
+        # happened to speak first.
+        peer_hint = info.sender_display if info.chat_type == "dm" else ""
+        slug = self.resolver.chat_slug(
+            info.platform,
+            info.chat_id,
+            name_hint=info.chat_name,
+            peer_hint=peer_hint,
+        )
+        return self._compose_slug(info.platform, slug)
+
+    @staticmethod
+    def _compose_slug(platform: str, chat_slug: str) -> str:
+        platform_part = platform or "unknown-platform"
+        return f"{platform_part}/{chat_slug}"
+
+    def _bot_display(self, platform: str, explicit: str = "") -> str:
+        """Display name for the bot's outbound sections.
+
+        Order: explicit caller string → ``bot_name`` config → resolver
+        chain on the bot's own ID (Matrix MXID when known) → "bot".
+        """
+        if explicit and not looks_like_id(explicit):
+            return explicit
+        if self.config.bot_name:
+            return self.config.bot_name
+        if self.bot_mxid:
+            # bot_mxid is a Matrix identity regardless of which
+            # platform this outbound message is for — resolve it under
+            # the matrix scope so the profile lookup applies and the
+            # cache entry lands in the right namespace.
+            resolved = self.resolver.user_display("matrix", self.bot_mxid)
+            if resolved:
+                return resolved
+        return "bot"
+
+    def _write_placeholder(self, info: EventInfo, path_slug: str) -> bool:
         """Write the initial placeholder section. Returns success."""
         fields = self._fields_for(info)
         body = info.body if info.kind == "text" else "(processing media…)"
         section = Section(
             event_id=info.event_id,
             timestamp=info.timestamp,
-            sender=self._best_display(info.sender_display, info.sender_mxid),
+            sender=self._sender_display(info),
             kind=info.kind,
             stage="received",
             fields=fields,
             body=body,
         )
         try:
-            self.writer.write_section(section, room_slug=room_slug)
+            self.writer.write_section(section, path_slug=path_slug)
         except Exception as exc:
             logger.error(
                 "hermes_chat_recorder: placeholder write failed for %s in %s: %s",
                 info.event_id,
-                room_slug,
+                path_slug,
                 exc,
             )
             return False
         return True
 
+    def _write_unprocessed(self, info: EventInfo, path_slug: str) -> None:
+        """Record a kind with no processing pipeline (video/file/location).
+
+        The section is terminal (stage "recorded") immediately: body is
+        the caption / text the platform delivered, fields carry the
+        media provenance.
+        """
+        fields = self._fields_for(info)
+        body = info.body or f"({info.kind} message)"
+        section = Section(
+            event_id=info.event_id,
+            timestamp=info.timestamp,
+            sender=self._sender_display(info),
+            kind=info.kind,
+            stage="recorded",
+            fields=fields,
+            body=body,
+        )
+        try:
+            self.writer.write_section(section, path_slug=path_slug)
+        except Exception as exc:
+            logger.warning(
+                "hermes_chat_recorder: %s write failed: %s", info.kind, exc
+            )
+
     def _maybe_wire_gateway(self, gateway: Any) -> None:
         """Fire the gateway-wiring callback exactly once, on first message.
 
         Hermes's ``on_session_start`` hook doesn't receive the gateway
-        object (see hermes_cli/hooks.py:142), so adapter wiring can't
-        happen there. ``pre_gateway_dispatch`` is the earliest hook
-        that does get it. We dedupe via ``self._gateway_wired`` so a
-        late-arriving second gateway (e.g. test ctx that swaps gateways
-        between calls) doesn't double-wrap ``adapter.send``.
+        object, so adapter wiring can't happen there.
+        ``pre_gateway_dispatch`` is the earliest hook that does get it.
+        We dedupe via ``self._gateway_wired`` so a late-arriving second
+        gateway (e.g. test ctx that swaps gateways between calls)
+        doesn't double-wrap ``adapter.send``.
         """
         if self._gateway_wired or gateway is None or self._wire_gateway_once is None:
             return
         self._gateway_wired = True
         try:
             self._wire_gateway_once(gateway)
-        except Exception as exc:  # noqa: BLE001 - wiring must never break dispatch
+        except Exception as exc:
             logger.warning("hermes_chat_recorder: gateway wiring failed: %s", exc)
 
-    def _best_display(self, hint: str, mxid: str) -> str:
-        """Return the friendliest available display string for a sender.
+    def _sender_display(self, info: EventInfo) -> str:
+        """Resolve the friendliest display string for an event's sender.
 
-        ``hint`` is whatever the caller already has on hand — mautrix's
-        enriched ``sender_display_name`` for inbound events, or an
-        explicit string for outbound bot replies. If it's empty, equal
-        to the MXID, or looks like an MXID itself, defer to the
-        resolver's lookup chain. Otherwise honor the hint verbatim so
-        callers can override (e.g. tests passing ``"Ralph"``).
+        The event's ``sender_display`` hint (the adapter's ``user_name``
+        or Matrix's enriched display name) is passed to the resolver,
+        which prefers overrides, falls back to lookups, and caches the
+        result.
         """
-        if hint and hint != mxid and not _looks_like_mxid(hint):
-            return hint
-        return self.resolver.user_display(mxid)
+        return self.resolver.user_display(
+            info.platform, info.sender_id, hint=info.sender_display
+        )
 
-    def _fields_for(self, info: MatrixEventInfo) -> dict[str, str]:
+    def _fields_for(self, info: EventInfo) -> dict[str, str]:
         fields: dict[str, str] = {}
         if info.mxc_url:
             fields["mxc"] = info.mxc_url
+        if info.media_path and info.kind in ("video", "file", "location"):
+            fields["media_path"] = info.media_path
         if info.mime:
             fields["mime"] = info.mime
         if info.duration_sec is not None:
             fields["duration_sec"] = str(info.duration_sec)
+        if info.reply_to_id:
+            fields["reply_to"] = info.reply_to_id
         return fields
 
-    def _process_voice(self, info: MatrixEventInfo, room_slug: str) -> tuple[str, bool]:
+    def _process_voice(self, info: EventInfo, path_slug: str) -> tuple[str, bool]:
         """Transcribe a voice note. Always writes a terminal section.
 
-        Prefers ``info.local_media_path`` (set by the Matrix adapter
-        after it downloads + decrypts the audio) so we don't need a
-        ``download_media`` callable at all. Falls back to the
-        ``mxc_url + self._download_media`` path for legacy events that
-        somehow lack the cached path.
+        Prefers ``info.media_path`` (set by the platform adapter after
+        it downloads + decrypts the audio) so no download callable is
+        needed. Falls back to the Matrix ``mxc_url + download_media``
+        path for legacy events that somehow lack the cached file.
         """
         transcriber = self._get_transcriber()
         if transcriber is None:
             self._write_terminal(
                 info,
-                room_slug,
+                path_slug,
                 stage="transcribe_failed",
                 body="(transcriber unavailable)",
             )
             return "", False
 
         try:
-            if info.local_media_path:
-                # Hermes already downloaded + decrypted the bytes — just
-                # hand the path to the STT layer.
-                transcript = transcriber.transcribe(info.local_media_path)
+            if info.media_path:
+                # The adapter already downloaded + decrypted the bytes —
+                # just hand the path to the STT layer.
+                transcript = transcriber.transcribe(info.media_path)
             elif self._download_media and info.mxc_url:
                 audio_bytes = self._download_media(info.mxc_url)
                 transcript = self._transcribe_bytes(
@@ -359,15 +441,15 @@ class Recorder:
             else:
                 self._write_terminal(
                     info,
-                    room_slug,
+                    path_slug,
                     stage="transcribe_failed",
-                    body="(no local path and no download callable)",
+                    body="(no local media path and no download fallback)",
                 )
                 return "", False
         except TranscriberError as exc:
             self._write_terminal(
                 info,
-                room_slug,
+                path_slug,
                 stage="transcribe_failed",
                 body=f"(transcription failed: {exc})",
             )
@@ -375,23 +457,23 @@ class Recorder:
         except Exception as exc:
             self._write_terminal(
                 info,
-                room_slug,
+                path_slug,
                 stage="transcribe_failed",
                 body=f"(download or io failure: {exc})",
             )
             return "", False
 
         body = f"> {transcript}" if transcript else "(empty transcript)"
-        self._write_terminal(info, room_slug, stage="transcribed", body=body)
+        self._write_terminal(info, path_slug, stage="transcribed", body=body)
         return transcript, True
 
     def _process_image(
-        self, info: MatrixEventInfo, room_slug: str
+        self, info: EventInfo, path_slug: str
     ) -> tuple[str, str, bool]:
         """Describe an image. Returns (description, ocr_text, success).
 
-        Prefers ``info.local_media_path`` (already downloaded +
-        decrypted by the Matrix adapter); falls back to fetching the
+        Prefers ``info.media_path`` (already downloaded + decrypted by
+        the platform adapter); falls back to fetching the Matrix
         ``mxc_url`` via the legacy download callable when the cached
         path is missing.
         """
@@ -399,31 +481,31 @@ class Recorder:
         if describer is None:
             self._write_terminal(
                 info,
-                room_slug,
+                path_slug,
                 stage="describe_failed",
                 body="(describer unavailable)",
             )
             return "", "", False
 
         try:
-            if info.local_media_path:
-                with open(info.local_media_path, "rb") as f:
+            if info.media_path:
+                with open(info.media_path, "rb") as f:
                     image_bytes = f.read()
             elif self._download_media and info.mxc_url:
                 image_bytes = self._download_media(info.mxc_url)
             else:
                 self._write_terminal(
                     info,
-                    room_slug,
+                    path_slug,
                     stage="describe_failed",
-                    body="(no local path and no download callable)",
+                    body="(no local media path and no download fallback)",
                 )
                 return "", "", False
             result = describer.describe(image_bytes, mime=info.mime or "image/png")
         except ImageDescriberError as exc:
             self._write_terminal(
                 info,
-                room_slug,
+                path_slug,
                 stage="describe_failed",
                 body=f"(description failed: {exc})",
             )
@@ -431,7 +513,7 @@ class Recorder:
         except Exception as exc:
             self._write_terminal(
                 info,
-                room_slug,
+                path_slug,
                 stage="describe_failed",
                 body=f"(download or io failure: {exc})",
             )
@@ -443,11 +525,11 @@ class Recorder:
         if result.text:
             body_parts.append(f"\n**text:**\n{result.text}")
         body = "\n".join(body_parts) if body_parts else "(empty description)"
-        self._write_terminal(info, room_slug, stage="described", body=body)
+        self._write_terminal(info, path_slug, stage="described", body=body)
         return result.description, result.text, True
 
-    def _write_edit(self, info: MatrixEventInfo, room_slug: str) -> None:
-        """Append a section for an ``m.replace`` edit event.
+    def _write_edit(self, info: EventInfo, path_slug: str) -> None:
+        """Append a section for a Matrix ``m.replace`` edit event.
 
         The edit has its own (new) event_id, so it gets its own
         section anchor. The ``edits:`` field points back at the
@@ -455,6 +537,10 @@ class Recorder:
         being changed. We don't try to mutate the original section in
         place — the vault is a historical record, and Matrix itself
         keeps every edit as a distinct event on the wire.
+
+        NOTE: Hermes's current Matrix adapter filters edits before
+        dispatch, so this path is dormant defense — it only fires if an
+        older or future adapter passes ``m.replace`` events through.
         """
         fields: dict[str, str] = {}
         if info.replaced_event_id:
@@ -462,21 +548,21 @@ class Recorder:
         section = Section(
             event_id=info.event_id,
             timestamp=info.timestamp,
-            sender=self._best_display(info.sender_display, info.sender_mxid),
+            sender=self._sender_display(info),
             kind="text",
             stage="edited",
             fields=fields,
             body=info.body or "(edited message body empty)",
         )
         try:
-            self.writer.write_section(section, room_slug=room_slug)
-        except Exception as exc:  # noqa: BLE001
+            self.writer.write_section(section, path_slug=path_slug)
+        except Exception as exc:
             logger.warning("hermes_chat_recorder: edit write failed: %s", exc)
 
     def _write_terminal(
         self,
-        info: MatrixEventInfo,
-        room_slug: str,
+        info: EventInfo,
+        path_slug: str,
         *,
         stage: str,
         body: str,
@@ -485,21 +571,22 @@ class Recorder:
         section = Section(
             event_id=info.event_id,
             timestamp=info.timestamp,
-            sender=self._best_display(info.sender_display, info.sender_mxid),
+            sender=self._sender_display(info),
             kind=info.kind,
             stage=stage,  # type: ignore[arg-type]
             fields=fields,
             body=body,
         )
         try:
-            self.writer.write_section(section, room_slug=room_slug)
+            self.writer.write_section(section, path_slug=path_slug)
         except Exception as exc:
             logger.warning("hermes_chat_recorder: terminal write failed: %s", exc)
 
     def _transcribe_bytes(
         self, transcriber: Transcriber, audio_bytes: bytes, mime: str
     ) -> str:
-        """Spill bytes to a tempfile so faster-whisper can read them."""
+        """Spill bytes to a tempfile so the STT layer can read them."""
+        import contextlib
         import os
         import tempfile
 
@@ -510,10 +597,8 @@ class Recorder:
                 f.write(audio_bytes)
             return transcriber.transcribe(path)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
 
     @staticmethod
     def _ext_for_mime(mime: str) -> str:

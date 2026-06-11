@@ -32,7 +32,6 @@ from hermes_chat_recorder.types import (
     WriteOutcome,
 )
 
-
 # Used to read the stage marker off an existing rendered section.
 _STAGE_PATTERN = re.compile(r"·\s*stage:(?P<stage>[A-Za-z_]+)")
 # Section terminator. Anchored to start-of-line so a literal "---" inside
@@ -90,9 +89,9 @@ def _find_existing_section(content: str, event_id: str) -> tuple[int, int, str] 
     section, replaceable wholesale).
 
     Boundary detection prefers the NEXT anchor over the next ``\\n---\\n``
-    terminator. A transcript body can legitimately contain a standalone
-    ``---`` line (matt's notes use it as a manual separator); if we
-    naïvely trusted the first terminator after the anchor we'd splice
+    terminator. A message body can legitimately contain a standalone
+    ``---`` line (it's a common manual separator in Markdown notes); if
+    we naïvely trusted the first terminator after the anchor we'd splice
     out only half the section and corrupt the next one. Anchors are
     package-controlled and never appear inside user content, so they're
     the reliable boundary.
@@ -102,13 +101,10 @@ def _find_existing_section(content: str, event_id: str) -> tuple[int, int, str] 
     if idx == -1:
         return None
 
-    # Look for the NEXT anchor — that's the start of the section after ours.
+    # Look for the NEXT anchor — that's the start of the section after
+    # ours. -1 means we're the last section: it runs to EOF.
     next_anchor_idx = content.find(_ANCHOR_PREFIX, idx + len(anchor))
-    if next_anchor_idx == -1:
-        # We're the last section in the file; section runs to EOF.
-        end = len(content)
-    else:
-        end = next_anchor_idx
+    end = len(content) if next_anchor_idx == -1 else next_anchor_idx
 
     return idx, end, content[idx:end]
 
@@ -123,7 +119,7 @@ class VaultWriter:
     """Thread-safe writer for stage-based markdown vault sections.
 
     Construct once and share across all callers in the process — locks
-    are cached internally per (room_slug, date) so concurrent calls to
+    are cached internally per (path_slug, date) so concurrent calls to
     different day files don't contend.
     """
 
@@ -137,7 +133,7 @@ class VaultWriter:
         self._vault_root = Path(vault_root)
         self._tz = ZoneInfo(timezone)
         # When ``flat_layout`` is true the writer ignores the
-        # ``room_slug`` argument and dumps everything into
+        # ``path_slug`` argument and dumps everything into
         # ``<vault_root>/<YYYY-MM-DD>.md``. Useful for 1-on-1 bots that
         # only ever live in a single DM — the per-room subfolder is
         # noise in that case.
@@ -154,19 +150,19 @@ class VaultWriter:
     def timezone(self) -> ZoneInfo:
         return self._tz
 
-    def day_file_path(self, room_slug: str, timestamp: datetime) -> Path:
+    def day_file_path(self, path_slug: str, timestamp: datetime) -> Path:
         """Return the absolute path of the per-day file an event belongs in.
 
-        In flat-layout mode the ``room_slug`` argument is ignored and
+        In flat-layout mode the ``path_slug`` argument is ignored and
         everything writes directly under ``vault_root``.
         """
         local = self._localize(timestamp)
         date_part = f"{local.strftime('%Y-%m-%d')}.md"
         if self._flat_layout:
             return self._vault_root / date_part
-        return self._vault_root / room_slug / date_part
+        return self._vault_root / path_slug / date_part
 
-    def write_section(self, section: Section, *, room_slug: str) -> WriteOutcome:
+    def write_section(self, section: Section, *, path_slug: str) -> WriteOutcome:
         """Append or update a section in the appropriate day file.
 
         Behaviour matches ``docs/DESIGN.md §3``:
@@ -182,9 +178,9 @@ class VaultWriter:
         """
         local_ts = self._localize(section.timestamp)
         date_str = local_ts.strftime("%Y-%m-%d")
-        day_file = self.day_file_path(room_slug, section.timestamp)
+        day_file = self.day_file_path(path_slug, section.timestamp)
 
-        lock = self._get_lock(room_slug, date_str)
+        lock = self._get_lock(path_slug, date_str)
         with lock:
             day_file.parent.mkdir(parents=True, exist_ok=True)
             existing_content = day_file.read_text(encoding="utf-8") if day_file.exists() else ""
@@ -214,7 +210,7 @@ class VaultWriter:
             day_file.write_text(replaced, encoding="utf-8")
             return WriteOutcome.REPLACED
 
-    def has_event(self, event_id: str, room_slug: str, timestamp: datetime) -> bool:
+    def has_event(self, event_id: str, path_slug: str, timestamp: datetime) -> bool:
         """Return True if a section for this event_id already exists in
         the appropriate day file. Useful for sync-replay short-circuit.
 
@@ -224,10 +220,10 @@ class VaultWriter:
         as "no anchor", the caller would re-record, and we'd end up
         with the same event written twice.
         """
-        day_file = self.day_file_path(room_slug, timestamp)
+        day_file = self.day_file_path(path_slug, timestamp)
         local_ts = self._localize(timestamp)
         date_str = local_ts.strftime("%Y-%m-%d")
-        lock = self._get_lock(room_slug, date_str)
+        lock = self._get_lock(path_slug, date_str)
         with lock:
             if not day_file.exists():
                 return False
@@ -243,12 +239,12 @@ class VaultWriter:
             return ts.replace(tzinfo=self._tz)
         return ts.astimezone(self._tz)
 
-    def _get_lock(self, room_slug: str, date_str: str) -> threading.Lock:
+    def _get_lock(self, path_slug: str, date_str: str) -> threading.Lock:
         # In flat layout, all writes for a given day share one file —
         # so they MUST share one lock regardless of which room they
         # originated from, otherwise two simultaneous writers from
         # different rooms could corrupt the same day file.
-        key = ("__flat__", date_str) if self._flat_layout else (room_slug, date_str)
+        key = ("__flat__", date_str) if self._flat_layout else (path_slug, date_str)
         with self._locks_lock:
             lock = self._locks.get(key)
             if lock is None:

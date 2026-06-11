@@ -141,7 +141,7 @@ def test_tempfile_uses_correct_extension_for_mime(mime: str, suffix: str) -> Non
 
 
 def test_async_vision_response_is_awaited() -> None:
-    async def _async_vision(path: str, prompt: str):  # noqa: ARG001
+    async def _async_vision(path: str, prompt: str):
         return _ok("DESCRIPTION:\nAsync.")
 
     # Inject a simple run_async that drives the coroutine to completion.

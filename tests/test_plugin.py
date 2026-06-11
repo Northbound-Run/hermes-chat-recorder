@@ -1,16 +1,16 @@
-"""Tests for plugin.register() + on_session_start wiring.
+"""Tests for plugin.register() + lazy gateway wiring.
 
 Covers the duck-typed ctx surface, hook binding, disabled-config no-op,
-config validation surface, and the on_session_start path that finds the
-live Matrix adapter, sets bot_mxid, captures the download handle, and
-wraps adapter.send for outbound recording.
+config validation surface, and the adapter-wiring path that wraps every
+platform adapter's ``send`` for outbound recording — with Matrix
+additionally contributing bot identity, a media-download fallback, and
+name-resolver lookups.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,30 +29,25 @@ def _build_ctx(plugin_block: dict, hooks: list) -> Any:
 
 
 def _neutral_event() -> Any:
-    """Non-Matrix event the recorder will pass through as ``None``.
+    """Source-less event the recorder ignores entirely.
 
     Used by wiring tests to invoke ``pre_gateway_dispatch`` purely for
-    its side effect of firing the lazy gateway-wire callback. The
-    recorder's matrix-event extractor returns ``None`` for non-Matrix
-    platforms, so no vault writes happen and the event flows on.
+    its side effect of firing the lazy gateway-wire callback. With no
+    ``source`` the extractor returns ``None``, so no vault writes
+    happen and the event flows on.
     """
     return SimpleNamespace(
         text="",
         message_id="$wiring:srv",
         message_type=SimpleNamespace(name="TEXT"),
-        source=SimpleNamespace(
-            platform=SimpleNamespace(value="telegram"),
-            chat_id="!noop",
-            user_id="@noop",
-        ),
+        source=None,
         raw_message=SimpleNamespace(),
     )
 
 
 def _fire_wiring(pre_dispatch, gateway: Any) -> None:
     """Invoke pre_gateway_dispatch with a neutral event so the recorder
-    fires its lazy gateway-wire callback. Mirrors the old
-    ``on_start(gateway=gateway)`` semantics for the test suite."""
+    fires its lazy gateway-wire callback."""
     pre_dispatch(event=_neutral_event(), gateway=gateway, session_store=None)
 
 
@@ -65,7 +60,7 @@ def _take(hooks: list, name: str):
 # ---------------------------------------------------------------------------
 
 
-def test_register_returns_recorder_and_binds_two_hooks(tmp_path: Path) -> None:
+def test_register_returns_recorder_and_binds_hook(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"enabled": True, "vault_root": str(tmp_path)}, hooks)
 
@@ -119,63 +114,73 @@ def test_bound_pre_gateway_dispatch_callable_with_event_kwarg(tmp_path: Path) ->
     register(ctx)
 
     pre_dispatch = next(cb for name, cb in hooks if name == "pre_gateway_dispatch")
-    # Non-matrix event → callback returns None.
-    event = SimpleNamespace(
-        text="x",
-        message_id="$x",
-        message_type=SimpleNamespace(name="TEXT"),
-        source=SimpleNamespace(platform=SimpleNamespace(value="telegram"), chat_id="c", user_id="u"),
-        raw_message=SimpleNamespace(),
+    assert pre_dispatch(event=_neutral_event(), gateway=None, session_store=None) is None
+
+
+def test_bound_hook_tolerates_future_kwargs(tmp_path: Path) -> None:
+    """Hermes may add hook kwargs in any release; the callback must not
+    TypeError on names it doesn't know."""
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    register(ctx)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+    result = pre_dispatch(
+        event=_neutral_event(), gateway=None, session_store=None, brand_new_kwarg=object()
     )
-    assert pre_dispatch(event=event, gateway=None, session_store=None) is None
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
-# on_session_start wiring — sync adapter (simpler)
+# Adapter wiring — sync adapter (simpler)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class _FakeSendResult:
-    event_id: str
+    """Mirrors Hermes's SendResult shape (success + message_id)."""
+
+    message_id: str
+    success: bool = True
 
 
 @dataclass
 class _FakeSyncAdapter:
-    user_id: str = "@ralph:srv"
+    user_id: str = "@recorder_bot:srv"
     sent: list = field(default_factory=list)
+    send_success: bool = True
 
     def send(self, chat_id: str, content: str | None = None, **kwargs):
-        # Mirror Hermes's canonical signature (see
-        # gateway/platforms/matrix.py:929) — keyword `content` is the
-        # message body. Older tests still pass positional `(chat_id,
+        # Mirror Hermes's canonical signature — keyword `content` is the
+        # message body. Older call sites pass positional `(chat_id,
         # text)`, which lands here as `(chat_id, content)`.
         text = content or kwargs.get("text", "") or ""
         self.sent.append((chat_id, text))
-        return _FakeSendResult(event_id=f"$outbound{len(self.sent)}:srv")
+        return _FakeSendResult(
+            message_id=f"$outbound{len(self.sent)}:srv", success=self.send_success
+        )
 
     def download_media(self, mxc: str) -> bytes:
         return b"AUDIO_BYTES"
 
 
-def _build_gateway(adapter: Any) -> Any:
+def _matrix_gateway(adapter: Any) -> Any:
     return SimpleNamespace(adapters={"matrix": adapter})
 
 
-def test_on_session_start_binds_bot_mxid_and_wraps_send(tmp_path: Path) -> None:
+def test_wiring_binds_bot_mxid_and_wraps_send(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
     assert recorder is not None
 
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
-    adapter = _FakeSyncAdapter(user_id="@ralph:srv")
-    gateway = _build_gateway(adapter)
+    adapter = _FakeSyncAdapter(user_id="@recorder_bot:srv")
+    gateway = _matrix_gateway(adapter)
 
     _fire_wiring(pre_dispatch, gateway)
 
     # bot_mxid carried over from adapter.user_id
-    assert recorder.bot_mxid == "@ralph:srv"
+    assert recorder.bot_mxid == "@recorder_bot:srv"
 
     # send is wrapped — calling it persists an outbound section.
     adapter.send("!room:srv", "ack")
@@ -188,17 +193,16 @@ def test_on_session_start_binds_bot_mxid_and_wraps_send(tmp_path: Path) -> None:
 
 def test_wrap_send_handles_hermes_kwarg_call_shape(tmp_path: Path) -> None:
     """Regression: Hermes invokes ``send(chat_id=..., content=...,
-    reply_to=..., metadata=...)`` (see gateway/platforms/base.py:2485).
-    Earlier versions of our wrapper hardcoded ``text`` as a required
-    positional, so this call shape crashed with ``missing 1 required
-    positional argument: 'text'`` and the bot never delivered replies.
-    """
+    reply_to=..., metadata=...)`` — keyword args, with ``content``, not
+    ``text``. An earlier wrapper hardcoded ``text`` as a required
+    positional, so this call shape crashed and the bot never delivered
+    replies."""
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
-    adapter = _FakeSyncAdapter(user_id="@ralph:srv")
-    _fire_wiring(pre_dispatch, _build_gateway(adapter))
+    adapter = _FakeSyncAdapter()
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
     # Exact call shape Hermes uses — keyword args, with `content`, not `text`.
     result = adapter.send(
@@ -207,16 +211,16 @@ def test_wrap_send_handles_hermes_kwarg_call_shape(tmp_path: Path) -> None:
         reply_to=None,
         metadata={"thread_id": "$t:srv"},
     )
-    assert result.event_id  # didn't crash
+    assert result.message_id  # didn't crash
 
     md = next(tmp_path.rglob("*.md")).read_text()
     assert "hello from hermes" in md
     assert "stage:sent" in md
 
 
-def test_on_session_start_wrap_is_idempotent(tmp_path: Path) -> None:
-    """Calling on_session_start twice (gateway restart) must NOT
-    double-wrap and double-record."""
+def test_wiring_is_idempotent(tmp_path: Path) -> None:
+    """Firing the wiring twice (gateway restart) must NOT double-wrap
+    and double-record."""
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
@@ -224,7 +228,7 @@ def test_on_session_start_wrap_is_idempotent(tmp_path: Path) -> None:
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _FakeSyncAdapter()
-    gateway = _build_gateway(adapter)
+    gateway = _matrix_gateway(adapter)
     _fire_wiring(pre_dispatch, gateway)
     _fire_wiring(pre_dispatch, gateway)
 
@@ -234,29 +238,32 @@ def test_on_session_start_wrap_is_idempotent(tmp_path: Path) -> None:
     assert content.count("<!-- event:") == 1
 
 
-def test_on_session_start_with_missing_gateway_kwarg_is_safe(tmp_path: Path) -> None:
+def test_wiring_with_missing_gateway_kwarg_is_safe(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
     # No exception, no crash — wiring callback simply doesn't fire
-    # when no gateway is supplied (matches Hermes's reality: only
-    # pre_gateway_dispatch ever delivers the gateway object).
+    # when no gateway is supplied.
     _fire_wiring(pre_dispatch, None)
     pre_dispatch(event=_neutral_event(), session_store=None)
 
 
-def test_on_session_start_with_no_matrix_adapter_is_safe(tmp_path: Path) -> None:
+def test_failed_send_is_not_recorded(tmp_path: Path) -> None:
+    """SendResult.success=False means the message never reached the
+    chat — recording it would archive a phantom reply."""
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+    adapter = _FakeSyncAdapter(send_success=False)
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
-    gateway = SimpleNamespace(adapters={"telegram": object()})
-    _fire_wiring(pre_dispatch, gateway)  # noop, no exception
+    adapter.send("!room:srv", "this never arrived")
+    assert list(tmp_path.rglob("*.md")) == []
 
 
-def test_on_session_start_resolves_download_callable(tmp_path: Path) -> None:
+def test_wiring_resolves_download_callable(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
@@ -264,42 +271,126 @@ def test_on_session_start_resolves_download_callable(tmp_path: Path) -> None:
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _FakeSyncAdapter()
-    gateway = _build_gateway(adapter)
-    _fire_wiring(pre_dispatch, gateway)
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
     # The download callable now points at the adapter's download_media.
-    assert recorder._download_media is not None  # noqa: SLF001 - test internal
-    assert recorder._download_media("mxc://x") == b"AUDIO_BYTES"  # noqa: SLF001
+    assert recorder._download_media is not None
+    assert recorder._download_media("mxc://x") == b"AUDIO_BYTES"
 
 
 # ---------------------------------------------------------------------------
-# on_session_start — async adapter shape
+# Multi-platform adapter wiring
+# ---------------------------------------------------------------------------
+
+
+def test_all_adapters_get_send_wrapped(tmp_path: Path) -> None:
+    """Every platform adapter — not just Matrix — must have its send
+    wrapped so outbound replies land in the vault under the right
+    platform folder."""
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    register(ctx)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+
+    matrix_adapter = _FakeSyncAdapter()
+    telegram_adapter = _FakeSyncAdapter(user_id="")
+    gateway = SimpleNamespace(
+        adapters={"matrix": matrix_adapter, "telegram": telegram_adapter}
+    )
+    _fire_wiring(pre_dispatch, gateway)
+
+    matrix_adapter.send("!room:srv", "matrix reply")
+    telegram_adapter.send("-1001234", "telegram reply")
+
+    matrix_files = list((tmp_path / "matrix").rglob("*.md"))
+    telegram_files = list((tmp_path / "telegram").rglob("*.md"))
+    assert len(matrix_files) == 1
+    assert len(telegram_files) == 1
+    assert "matrix reply" in matrix_files[0].read_text()
+    assert "telegram reply" in telegram_files[0].read_text()
+
+
+def test_gateway_with_no_matrix_adapter_still_wraps_others(tmp_path: Path) -> None:
+    """A gateway running only Telegram (no Matrix at all) still gets
+    outbound recording; the Matrix-only extras are simply skipped."""
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    recorder = register(ctx)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+
+    telegram_adapter = _FakeSyncAdapter(user_id="")
+    gateway = SimpleNamespace(adapters={"telegram": telegram_adapter})
+    _fire_wiring(pre_dispatch, gateway)
+
+    assert recorder.bot_mxid == ""  # no Matrix → no MXID
+    telegram_adapter.send("-5", "hi")
+    assert len(list((tmp_path / "telegram").rglob("*.md"))) == 1
+
+
+def test_adapter_without_send_is_skipped_safely(tmp_path: Path) -> None:
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    register(ctx)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+
+    gateway = SimpleNamespace(adapters={"webhook": object()})
+    _fire_wiring(pre_dispatch, gateway)  # no exception
+
+
+def test_finds_adapters_when_dict_keyed_by_enum(tmp_path: Path) -> None:
+    """Hermes's GatewayRunner.adapters is Dict[Platform, BasePlatformAdapter]
+    — keyed by enum, not string. The wiring must normalize keys via
+    ``.value`` rather than relying on dict-string lookup."""
+    hooks: list = []
+    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
+    register(ctx)
+    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
+
+    # Simulate Platform enum members.
+    class _PlatformEnum:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    adapter = _FakeSyncAdapter()
+    gateway = SimpleNamespace(adapters={_PlatformEnum("matrix"): adapter})
+
+    _fire_wiring(pre_dispatch, gateway)
+
+    # If the lookup found the adapter, send was wrapped — verify by
+    # firing send and checking the vault gets the outbound section.
+    adapter.send("!room:srv", "ack")
+    content = next(tmp_path.rglob("*.md")).read_text()
+    assert "ack" in content
+    assert "stage:sent" in content
+
+
+# ---------------------------------------------------------------------------
+# Adapter wiring — async adapter shape
 # ---------------------------------------------------------------------------
 
 
 class _FakeAsyncAdapter:
     def __init__(self):
-        self.user_id = "@ralph:srv"
+        self.user_id = "@recorder_bot:srv"
         self.sent: list = []
 
     async def send(self, chat_id: str, content: str | None = None, **kwargs):
         text = content or kwargs.get("text", "") or ""
         self.sent.append((chat_id, text))
-        return _FakeSendResult(event_id=f"$async{len(self.sent)}:srv")
+        return _FakeSendResult(message_id=f"$async{len(self.sent)}:srv")
 
-    async def download_media(self, mxc: str) -> bytes:  # noqa: ARG002
+    async def download_media(self, mxc: str) -> bytes:
         return b"AUDIO_BYTES_ASYNC"
 
 
-def test_on_session_start_handles_async_send_adapter(tmp_path: Path) -> None:
+def test_wiring_handles_async_send_adapter(tmp_path: Path) -> None:
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     register(ctx)
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _FakeAsyncAdapter()
-    gateway = _build_gateway(adapter)
-    _fire_wiring(pre_dispatch, gateway)
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
     # Drive the async wrapper from an event loop.
     asyncio.run(adapter.send("!room:srv", "hi from async"))
@@ -322,31 +413,32 @@ def test_bot_mxid_resolved_via_config_attr(tmp_path: Path) -> None:
 
     adapter = SimpleNamespace(
         config=SimpleNamespace(user_id="@from_config:srv"),
-        send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
+        send=lambda *a, **k: _FakeSendResult(message_id="$x:srv"),
     )
-    _fire_wiring(pre_dispatch, _build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
     assert recorder.bot_mxid == "@from_config:srv"
 
 
 # ---------------------------------------------------------------------------
-# Sync↔async bridges (Codex review fixes)
+# Sync↔async bridges
 # ---------------------------------------------------------------------------
 
 
 class _SyncReturningCoroAdapter:
-    """The trap shape: `send` looks sync (not declared async def) but
-    returns an awaitable. ``inspect.iscoroutinefunction`` returns False
-    so the old sync wrapper recorded the coroutine object, not the
-    awaited result. Codex caught this — the wrapper now detects via
-    ``isawaitable`` and bridges via the background loop."""
+    """The trap shape: ``send`` looks sync (not declared ``async def``)
+    but returns an awaitable. ``inspect.iscoroutinefunction`` returns
+    False, so a naive sync wrapper would record the coroutine object
+    instead of the awaited result — and the send might never complete.
+    The wrapper must detect via ``isawaitable`` and bridge through the
+    background loop."""
 
     def __init__(self) -> None:
-        self.user_id = "@ralph:srv"
+        self.user_id = "@recorder_bot:srv"
 
     def send(self, chat_id: str, content: str | None = None, **_):  # type: ignore[no-untyped-def]
         async def _real_send():
             await asyncio.sleep(0.01)
-            return _FakeSendResult(event_id="$bridged:srv")
+            return _FakeSendResult(message_id="$bridged:srv")
 
         return _real_send()
 
@@ -358,14 +450,14 @@ def test_wrap_send_handles_sync_function_returning_coroutine(tmp_path: Path) -> 
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _SyncReturningCoroAdapter()
-    _fire_wiring(pre_dispatch, _build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
     # Caller is sync; result must be awaited via the background loop
-    # before we record. Without the fix, the recorded event_id would
+    # before we record. Without the bridge, the recorded event_id would
     # have been a synthetic timestamp fallback.
     result = adapter.send("!room:srv", "hi via sync-returning-coro")
     assert isinstance(result, _FakeSendResult)
-    assert result.event_id == "$bridged:srv"
+    assert result.message_id == "$bridged:srv"
 
     content = next(tmp_path.rglob("*.md")).read_text()
     assert "<!-- event:$bridged:srv -->" in content
@@ -374,38 +466,37 @@ def test_wrap_send_handles_sync_function_returning_coroutine(tmp_path: Path) -> 
 
 class _AsyncDownloadAdapter:
     def __init__(self) -> None:
-        self.user_id = "@ralph:srv"
+        self.user_id = "@recorder_bot:srv"
         self.send_calls: list = []
 
     def send(self, chat_id, content=None, **kwargs):
         text = content or kwargs.get("text", "") or ""
         self.send_calls.append((chat_id, text))
-        return _FakeSendResult(event_id="$x")
+        return _FakeSendResult(message_id="$x")
 
-    async def download_media(self, mxc: str) -> bytes:  # noqa: ARG002
+    async def download_media(self, mxc: str) -> bytes:
         await asyncio.sleep(0.01)
         return b"AUDIO_FROM_ASYNC"
 
 
 # ---------------------------------------------------------------------------
-# Name resolver wiring at on_session_start
+# Name resolver wiring
 # ---------------------------------------------------------------------------
 
 
 class _FakeNameClient:
     """Mautrix-shaped client surface used by _wire_name_resolver.
 
-    Mixes sync and async methods to exercise both code paths in the
-    background-loop bridge.
+    Async methods exercise the background-loop bridge.
     """
 
     def __init__(self) -> None:
         self.room_names = {"!room1:srv": "Matt & Annika"}
-        self.displaynames = {"@matt:srv": "Matt Hall", "@ralph:srv": "Ralph"}
+        self.displaynames = {"@matt:srv": "Matt Hall", "@recorder_bot:srv": "Recorder"}
         # Members per room: room_id -> {mxid: {"displayname": str}}
         self.members = {
             "!dmroom:srv": {
-                "@ralph:srv": {"displayname": "Ralph"},
+                "@recorder_bot:srv": {"displayname": "Recorder"},
                 "@matt:srv": {"displayname": "Matt Hall"},
             }
         }
@@ -432,14 +523,14 @@ def test_name_resolver_wires_pretty_room_and_user_names(tmp_path: Path) -> None:
 
     client = _FakeNameClient()
     adapter = SimpleNamespace(
-        user_id="@ralph:srv",
+        user_id="@recorder_bot:srv",
         client=client,
-        send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
+        send=lambda *a, **k: _FakeSendResult(message_id="$x:srv"),
     )
-    _fire_wiring(pre_dispatch, _build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
-    assert recorder.resolver.room_slug("!room1:srv") == "Matt-and-Annika"
-    assert recorder.resolver.user_display("@matt:srv") == "Matt Hall"
+    assert recorder.resolver.chat_slug("matrix", "!room1:srv") == "Matt-and-Annika"
+    assert recorder.resolver.user_display("matrix", "@matt:srv") == "Matt Hall"
 
 
 def test_name_resolver_falls_back_to_dm_peer_when_room_name_missing(
@@ -452,43 +543,15 @@ def test_name_resolver_falls_back_to_dm_peer_when_room_name_missing(
 
     client = _FakeNameClient()
     adapter = SimpleNamespace(
-        user_id="@ralph:srv",
+        user_id="@recorder_bot:srv",
         client=client,
-        send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
+        send=lambda *a, **k: _FakeSendResult(message_id="$x:srv"),
     )
-    _fire_wiring(pre_dispatch, _build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
     # !dmroom:srv has no m.room.name; resolver should pick the peer's
     # display name (skipping the bot itself).
-    assert recorder.resolver.room_slug("!dmroom:srv") == "Matt-Hall"
-
-
-def test_finds_matrix_adapter_when_adapters_dict_keyed_by_enum(tmp_path: Path) -> None:
-    """Hermes's GatewayRunner.adapters is Dict[Platform, BasePlatformAdapter]
-    — keyed by enum, not string. Our finder must locate the adapter via
-    ``.platform.value == 'matrix'`` rather than dict-string lookup."""
-    hooks: list = []
-    ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
-    recorder = register(ctx)
-    pre_dispatch = _take(hooks, "pre_gateway_dispatch")
-
-    # Simulate a Platform enum member.
-    class _PlatformEnum:
-        def __init__(self, value: str) -> None:
-            self.value = value
-
-    matrix_platform = _PlatformEnum("matrix")
-    adapter = _FakeSyncAdapter()
-    gateway = SimpleNamespace(adapters={matrix_platform: adapter})
-
-    _fire_wiring(pre_dispatch, gateway)
-
-    # If the lookup found the adapter, send was wrapped — verify by
-    # firing send and checking the vault gets the outbound section.
-    adapter.send("!room:srv", "ack")
-    content = next(tmp_path.rglob("*.md")).read_text()
-    assert "ack" in content
-    assert "stage:sent" in content
+    assert recorder.resolver.chat_slug("matrix", "!dmroom:srv") == "Matt-Hall"
 
 
 def test_name_resolver_safe_when_adapter_has_no_client(tmp_path: Path) -> None:
@@ -500,27 +563,24 @@ def test_name_resolver_safe_when_adapter_has_no_client(tmp_path: Path) -> None:
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = SimpleNamespace(
-        user_id="@ralph:srv",
-        send=lambda *a, **k: _FakeSendResult(event_id="$x:srv"),
+        user_id="@recorder_bot:srv",
+        send=lambda *a, **k: _FakeSendResult(message_id="$x:srv"),
     )
-    _fire_wiring(pre_dispatch, _build_gateway(adapter))
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
 
-    # Falls back to slug-from-room-id.
-    assert recorder.resolver.room_slug("!abc:srv") == "abc"
+    # Falls back to slug-from-chat-id.
+    assert recorder.resolver.chat_slug("matrix", "!abc:srv") == "abc"
     # Falls back to MXID localpart.
-    assert recorder.resolver.user_display("@matt:srv") == "matt"
+    assert recorder.resolver.user_display("matrix", "@matt:srv") == "matt"
 
 
 def test_async_download_callable_works_from_inside_running_loop(tmp_path: Path) -> None:
-    """The killer scenario from Codex's #1 concern.
-
-    ``_resolve_download_callable`` wraps the adapter's async
-    download_media for sync callers. Old impl used ``asyncio.run`` which
+    """``_resolve_download_callable`` wraps the adapter's async
+    download_media for sync callers. A naive ``asyncio.run`` bridge
     raises ``RuntimeError: asyncio.run() cannot be called from a
-    running event loop`` when called from a thread that already has
-    a loop running — exactly Hermes's hot path. The fix routes through
-    a dedicated background-loop singleton.
-    """
+    running event loop`` when called from a thread that already has a
+    loop running — exactly Hermes's hot path. The bridge must route
+    through the dedicated background-loop singleton instead."""
     hooks: list = []
     ctx = _build_ctx({"vault_root": str(tmp_path)}, hooks)
     recorder = register(ctx)
@@ -528,13 +588,13 @@ def test_async_download_callable_works_from_inside_running_loop(tmp_path: Path) 
     pre_dispatch = _take(hooks, "pre_gateway_dispatch")
 
     adapter = _AsyncDownloadAdapter()
-    _fire_wiring(pre_dispatch, _build_gateway(adapter))
-    assert recorder._download_media is not None  # noqa: SLF001
+    _fire_wiring(pre_dispatch, _matrix_gateway(adapter))
+    assert recorder._download_media is not None
 
     async def _drive() -> bytes:
         # Inside a running event loop on this thread. The bridge MUST
         # still return bytes synchronously.
-        return recorder._download_media("mxc://x/y")  # noqa: SLF001
+        return recorder._download_media("mxc://x/y")
 
     result = asyncio.run(_drive())
     assert result == b"AUDIO_FROM_ASYNC"

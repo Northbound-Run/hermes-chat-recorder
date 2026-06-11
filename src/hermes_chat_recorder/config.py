@@ -23,11 +23,19 @@ class RecorderConfig:
     record_outbound: bool = True
     timezone: str = "America/Los_Angeles"
 
-    # "group" (default) writes <vault_root>/<room-slug>/<YYYY-MM-DD>.md;
+    # "group" (default) writes <vault_root>/<platform>/<chat-slug>/<YYYY-MM-DD>.md;
     # "1on1" assumes the bot only ever lives in a single DM and flattens
-    # the layout to <vault_root>/<YYYY-MM-DD>.md, dropping the per-room
-    # subfolder entirely.
+    # the layout to <vault_root>/<YYYY-MM-DD>.md, dropping the
+    # per-platform and per-chat subfolders entirely.
     bot_type: str = "group"
+
+    # Platform allowlist. Empty (default) records every platform the
+    # gateway dispatches. Set e.g. ["matrix", "telegram"] to restrict.
+    platforms: frozenset[str] = frozenset()
+
+    # Display name for the bot's own outbound sections. Empty → resolve
+    # via the normal name chain (Matrix profile, ID localpart, "bot").
+    bot_name: str = ""
 
     # Manual name overrides. Useful for bridge-puppet MXIDs (Signal,
     # WhatsApp) that never get a homeserver display name. The plugin
@@ -151,6 +159,26 @@ def load_config(
             f"bot_type must be one of {sorted(_VALID_BOT_TYPES)}, got {bot_type!r}"
         )
 
+    platforms_raw = _opt("platforms", [])
+    if not isinstance(platforms_raw, (list, tuple)):
+        raise ConfigError(
+            f"platforms must be a list of platform names, got {type(platforms_raw).__name__}"
+        )
+    platforms: set[str] = set()
+    for item in platforms_raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(
+                f"platforms entries must be non-empty strings, got {item!r}"
+            )
+        platforms.add(item.strip().lower())
+
+    bot_name_raw = _opt("bot_name", "")
+    if not isinstance(bot_name_raw, str):
+        raise ConfigError(
+            f"bot_name must be a string, got {type(bot_name_raw).__name__}"
+        )
+    bot_name = bot_name_raw.strip()
+
     for unsupported in ("record_image_bytes", "record_audio_bytes"):
         if unsupported in block:
             raise ConfigError(
@@ -176,6 +204,8 @@ def load_config(
         record_outbound=record_outbound,
         timezone=tz,
         bot_type=bot_type,
+        platforms=frozenset(platforms),
+        bot_name=bot_name,
         room_overrides=room_overrides,
         user_overrides=user_overrides,
         raw_block=block,

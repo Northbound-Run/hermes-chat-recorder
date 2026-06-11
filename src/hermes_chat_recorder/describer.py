@@ -18,6 +18,7 @@ human-readable and structured.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import logging
@@ -31,13 +32,17 @@ from hermes_chat_recorder.types import DescribeResult
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_PROMPT = """You will receive an image. Produce TWO sections.
-
-DESCRIPTION:
-Write 1-3 short sentences describing what is in the image: subject, setting, notable details. Avoid speculation about who people are.
-
-TEXT:
-Transcribe any literal text visible in the image, preserving line breaks. If no text appears in the image, write "(none)"."""
+DEFAULT_PROMPT = (
+    "You will receive an image. Produce TWO sections.\n"
+    "\n"
+    "DESCRIPTION:\n"
+    "Write 1-3 short sentences describing what is in the image: subject, "
+    "setting, notable details. Avoid speculation about who people are.\n"
+    "\n"
+    "TEXT:\n"
+    "Transcribe any literal text visible in the image, preserving line "
+    'breaks. If no text appears in the image, write "(none)".'
+)
 
 
 # Signature: (image_path_or_url: str, user_prompt: str) -> JSON string or awaitable
@@ -109,10 +114,8 @@ class ImageDescriber:
             if inspect.isawaitable(result):
                 result = self._await(result)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
 
         return _parse_vision_response(result)
 

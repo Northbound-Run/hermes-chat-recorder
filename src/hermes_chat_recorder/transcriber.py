@@ -19,7 +19,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-# Signature: (audio_path: str) -> {"success": bool, "transcript": str, "error"?: str, "provider"?: str}
+# Signature: (audio_path: str) ->
+#   {"success": bool, "transcript": str, "error"?: str, "provider"?: str}
 TranscribeFn = Callable[[str], dict]
 
 

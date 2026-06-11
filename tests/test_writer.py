@@ -11,8 +11,6 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-
-import pytest
 from zoneinfo import ZoneInfo
 
 from hermes_chat_recorder.types import Section, WriteOutcome
@@ -22,7 +20,6 @@ from hermes_chat_recorder.writer import (
     _find_existing_section,
     render_section,
 )
-
 
 PT = ZoneInfo("America/Los_Angeles")
 ROOM = "northbound-ceo"
@@ -36,7 +33,7 @@ def _section(
     event_id: str = "$abc:server",
     stage: str = "received",
     kind: str = "text",
-    body: str = "hey ralph",
+    body: str = "hey there",
     ts: datetime | None = None,
     fields: dict[str, str] | None = None,
 ) -> Section:
@@ -117,7 +114,7 @@ def test_find_existing_section_handles_literal_triple_dash_in_body() -> None:
     blob = s1 + s2
     found = _find_existing_section(blob, "$with_rule")
     assert found is not None
-    start, end, text = found
+    _start, end, text = found
     # The boundary must land at the start of the $after anchor — NOT at
     # the first `---` inside the body.
     assert blob[end:].startswith("<!-- event:$after -->")
@@ -146,21 +143,21 @@ def test_find_existing_section_event_id_in_body_is_not_a_false_positive() -> Non
 
 def test_appends_to_fresh_file(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
-    outcome = w.write_section(_section(), room_slug=ROOM)
+    outcome = w.write_section(_section(), path_slug=ROOM)
     assert outcome == WriteOutcome.APPENDED
 
     expected = tmp_path / ROOM / "2026-05-26.md"
     assert expected.exists()
     content = expected.read_text()
     assert "<!-- event:$abc:server -->" in content
-    assert "hey ralph" in content
+    assert "hey there" in content
 
 
 def test_appends_multiple_distinct_sections(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
-    assert w.write_section(_section(event_id="$one", body="first"), room_slug=ROOM) == WriteOutcome.APPENDED
-    assert w.write_section(_section(event_id="$two", body="second"), room_slug=ROOM) == WriteOutcome.APPENDED
-    assert w.write_section(_section(event_id="$three", body="third"), room_slug=ROOM) == WriteOutcome.APPENDED
+    for event_id, body in (("$one", "first"), ("$two", "second"), ("$three", "third")):
+        outcome = w.write_section(_section(event_id=event_id, body=body), path_slug=ROOM)
+        assert outcome == WriteOutcome.APPENDED
 
     day_file = tmp_path / ROOM / "2026-05-26.md"
     content = day_file.read_text()
@@ -172,11 +169,11 @@ def test_replaces_existing_section_on_stage_transition(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
     # First write: received placeholder.
     placeholder = _section(stage="received", body="(transcribing...)")
-    w.write_section(placeholder, room_slug=ROOM)
+    w.write_section(placeholder, path_slug=ROOM)
 
     # Update: terminal transcribed.
     final = _section(stage="transcribed", body="real transcript text")
-    outcome = w.write_section(final, room_slug=ROOM)
+    outcome = w.write_section(final, path_slug=ROOM)
     assert outcome == WriteOutcome.REPLACED
 
     day_file = tmp_path / ROOM / "2026-05-26.md"
@@ -190,9 +187,9 @@ def test_replaces_terminal_to_different_terminal(tmp_path: Path) -> None:
     """A section that landed at one terminal stage CAN be replaced by a
     different terminal (e.g. operator manually re-runs description)."""
     w = VaultWriter(vault_root=tmp_path)
-    w.write_section(_section(stage="describe_failed", body="(timed out)"), room_slug=ROOM)
+    w.write_section(_section(stage="describe_failed", body="(timed out)"), path_slug=ROOM)
     outcome = w.write_section(
-        _section(stage="described", body="A whiteboard photo."), room_slug=ROOM
+        _section(stage="described", body="A whiteboard photo."), path_slug=ROOM
     )
     assert outcome == WriteOutcome.REPLACED
     day_file = tmp_path / ROOM / "2026-05-26.md"
@@ -201,9 +198,9 @@ def test_replaces_terminal_to_different_terminal(tmp_path: Path) -> None:
 
 def test_no_op_when_same_terminal_stage(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
-    w.write_section(_section(stage="transcribed", body="content"), room_slug=ROOM)
+    w.write_section(_section(stage="transcribed", body="content"), path_slug=ROOM)
     # Same event_id + same terminal stage — should NO_OP.
-    outcome = w.write_section(_section(stage="transcribed", body="content"), room_slug=ROOM)
+    outcome = w.write_section(_section(stage="transcribed", body="content"), path_slug=ROOM)
     assert outcome == WriteOutcome.NO_OP
     day_file = tmp_path / ROOM / "2026-05-26.md"
     assert day_file.read_text().count("<!-- event:$abc:server -->") == 1
@@ -216,18 +213,18 @@ def test_replace_section_with_triple_dash_in_body_keeps_next_intact(tmp_path: Pa
     w = VaultWriter(vault_root=tmp_path)
     body = "transcript line\n\n---\n\nsecond paragraph"
     w.write_section(
-        _section(event_id="$first", stage="received", body=body), room_slug=ROOM
+        _section(event_id="$first", stage="received", body=body), path_slug=ROOM
     )
     w.write_section(
         _section(event_id="$second", stage="received", body="next section"),
-        room_slug=ROOM,
+        path_slug=ROOM,
     )
 
     # Update $first to terminal stage with NEW body (still contains ---).
     new_body = "updated transcript\n\n---\n\nupdated tail"
     w.write_section(
         _section(event_id="$first", stage="transcribed", body=new_body),
-        room_slug=ROOM,
+        path_slug=ROOM,
     )
 
     content = (tmp_path / ROOM / "2026-05-26.md").read_text()
@@ -242,8 +239,8 @@ def test_replace_section_with_triple_dash_in_body_keeps_next_intact(tmp_path: Pa
 def test_non_terminal_to_non_terminal_replaces(tmp_path: Path) -> None:
     """received → received with new fields should replace (not no-op)."""
     w = VaultWriter(vault_root=tmp_path)
-    w.write_section(_section(stage="received", body="v1"), room_slug=ROOM)
-    outcome = w.write_section(_section(stage="received", body="v2"), room_slug=ROOM)
+    w.write_section(_section(stage="received", body="v1"), path_slug=ROOM)
+    outcome = w.write_section(_section(stage="received", body="v2"), path_slug=ROOM)
     assert outcome == WriteOutcome.REPLACED
     day_file = tmp_path / ROOM / "2026-05-26.md"
     assert "v2" in day_file.read_text()
@@ -267,8 +264,8 @@ def test_event_local_date_picks_day_file(tmp_path: Path) -> None:
         body="morning",
         ts=_ts(day=27, hour=0, minute=1),
     )
-    w.write_section(night, room_slug=ROOM)
-    w.write_section(morning, room_slug=ROOM)
+    w.write_section(night, path_slug=ROOM)
+    w.write_section(morning, path_slug=ROOM)
 
     assert (tmp_path / ROOM / "2026-05-26.md").exists()
     assert (tmp_path / ROOM / "2026-05-27.md").exists()
@@ -283,14 +280,14 @@ def test_utc_timestamp_converted_to_configured_zone(tmp_path: Path) -> None:
     on May 26)."""
     w = VaultWriter(vault_root=tmp_path, timezone="America/Los_Angeles")
     utc_ts = datetime(2026, 5, 26, 7, 0, tzinfo=timezone.utc)  # 00:00 PT, May 26
-    w.write_section(_section(ts=utc_ts), room_slug=ROOM)
+    w.write_section(_section(ts=utc_ts), path_slug=ROOM)
     assert (tmp_path / ROOM / "2026-05-26.md").exists()
 
 
 def test_naive_timestamp_assumed_to_be_in_configured_zone(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path, timezone="America/Los_Angeles")
     naive = datetime(2026, 5, 26, 9, 14)  # no tzinfo
-    w.write_section(_section(ts=naive), room_slug=ROOM)  # type: ignore[arg-type]
+    w.write_section(_section(ts=naive), path_slug=ROOM)  # type: ignore[arg-type]
     # Lands in PT's May 26 file.
     assert (tmp_path / ROOM / "2026-05-26.md").exists()
 
@@ -307,13 +304,13 @@ def test_has_event_false_when_file_missing(tmp_path: Path) -> None:
 
 def test_has_event_true_after_write(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
-    w.write_section(_section(event_id="$present"), room_slug=ROOM)
+    w.write_section(_section(event_id="$present"), path_slug=ROOM)
     assert w.has_event("$present", ROOM, _ts()) is True
 
 
 def test_has_event_false_for_different_event(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
-    w.write_section(_section(event_id="$one"), room_slug=ROOM)
+    w.write_section(_section(event_id="$one"), path_slug=ROOM)
     assert w.has_event("$two", ROOM, _ts()) is False
 
 
@@ -328,7 +325,7 @@ def test_concurrent_writes_to_same_day_file_serialize(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
 
     def worker(i: int) -> None:
-        w.write_section(_section(event_id=f"$evt{i}:s", body=f"body{i}"), room_slug=ROOM)
+        w.write_section(_section(event_id=f"$evt{i}:s", body=f"body{i}"), path_slug=ROOM)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
     for th in threads:
@@ -351,7 +348,7 @@ def test_concurrent_writes_different_rooms_dont_block(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path)
 
     def writer(room: str, evt: str) -> None:
-        w.write_section(_section(event_id=evt, body=room), room_slug=room)
+        w.write_section(_section(event_id=evt, body=room), path_slug=room)
 
     t1 = threading.Thread(target=writer, args=("room-a", "$a"))
     t2 = threading.Thread(target=writer, args=("room-b", "$b"))
@@ -368,9 +365,9 @@ def test_lock_cache_reuses_same_lock_for_same_key(tmp_path: Path) -> None:
     """Idempotency / efficiency: asking for the lock twice yields the
     same lock object. Important so concurrent writers actually serialize."""
     w = VaultWriter(vault_root=tmp_path)
-    l1 = w._get_lock(ROOM, "2026-05-26")  # noqa: SLF001 - test internal
-    l2 = w._get_lock(ROOM, "2026-05-26")  # noqa: SLF001
-    l3 = w._get_lock("other", "2026-05-26")  # noqa: SLF001
+    l1 = w._get_lock(ROOM, "2026-05-26")
+    l2 = w._get_lock(ROOM, "2026-05-26")
+    l3 = w._get_lock("other", "2026-05-26")
     assert l1 is l2
     assert l1 is not l3
 
@@ -396,7 +393,7 @@ def test_flat_layout_writes_directly_under_vault_root(tmp_path: Path) -> None:
     """In flat mode the day file lives at <vault>/<date>.md — no
     per-room subfolder."""
     w = VaultWriter(vault_root=tmp_path, flat_layout=True)
-    outcome = w.write_section(_flat_section("$a:srv"), room_slug="ignored")
+    outcome = w.write_section(_flat_section("$a:srv"), path_slug="ignored")
     assert outcome == WriteOutcome.APPENDED
 
     day_files = list(tmp_path.glob("*.md"))
@@ -408,8 +405,8 @@ def test_flat_layout_writes_directly_under_vault_root(tmp_path: Path) -> None:
 
 def test_flat_layout_collapses_two_rooms_to_one_file(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path, flat_layout=True)
-    w.write_section(_flat_section("$a:srv", body="from room-a"), room_slug="room-a")
-    w.write_section(_flat_section("$b:srv", body="from room-b"), room_slug="room-b")
+    w.write_section(_flat_section("$a:srv", body="from room-a"), path_slug="room-a")
+    w.write_section(_flat_section("$b:srv", body="from room-b"), path_slug="room-b")
 
     day_files = list(tmp_path.glob("*.md"))
     assert len(day_files) == 1
@@ -418,16 +415,16 @@ def test_flat_layout_collapses_two_rooms_to_one_file(tmp_path: Path) -> None:
     assert "from room-b" in text
 
 
-def test_flat_layout_shares_lock_across_room_slugs(tmp_path: Path) -> None:
+def test_flat_layout_shares_lock_across_path_slugs(tmp_path: Path) -> None:
     w = VaultWriter(vault_root=tmp_path, flat_layout=True)
-    l1 = w._get_lock("room-a", "2026-05-26")  # noqa: SLF001
-    l2 = w._get_lock("room-b", "2026-05-26")  # noqa: SLF001
+    l1 = w._get_lock("room-a", "2026-05-26")
+    l2 = w._get_lock("room-b", "2026-05-26")
     assert l1 is l2
 
 
 def test_per_room_layout_unchanged_by_default(tmp_path: Path) -> None:
     """Default flat_layout=False preserves per-room subfolders."""
     w = VaultWriter(vault_root=tmp_path)
-    w.write_section(_flat_section("$a:srv"), room_slug="Matt-and-Annika")
+    w.write_section(_flat_section("$a:srv"), path_slug="Matt-and-Annika")
     assert (tmp_path / "Matt-and-Annika").is_dir()
     assert list((tmp_path / "Matt-and-Annika").glob("*.md")) != []

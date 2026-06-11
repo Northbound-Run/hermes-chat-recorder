@@ -14,6 +14,7 @@ from typing import Literal
 # Stage names match docs/DESIGN.md §3.
 Stage = Literal[
     "received",
+    "recorded",
     "transcribed",
     "described",
     "transcribe_failed",
@@ -22,15 +23,28 @@ Stage = Literal[
     "edited",
 ]
 
-# Logical kind of a Matrix message — picked so the gate and writer don't
-# need to know mautrix's wire-level constants.
-MessageKind = Literal["text", "voice", "image", "reply"]
+# Logical kind of a message — picked so the recorder and writer don't
+# need to know any platform's wire-level constants. "voice" and "image"
+# go through the STT / vision pipelines; "video", "file", and
+# "location" are recorded as-is (stage "recorded") without processing.
+MessageKind = Literal[
+    "text", "voice", "image", "video", "file", "location", "reply"
+]
 
 
 # Stages whose sections should NOT be replaced once written, except by
-# the SAME stage (in which case the write is a no-op).
+# the SAME stage (in which case the write is a no-op). "recorded" is
+# the terminal stage for kinds that have no processing pipeline.
 TERMINAL_STAGES: frozenset[str] = frozenset(
-    {"transcribed", "described", "transcribe_failed", "describe_failed", "sent", "edited"}
+    {
+        "recorded",
+        "transcribed",
+        "described",
+        "transcribe_failed",
+        "describe_failed",
+        "sent",
+        "edited",
+    }
 )
 
 
@@ -65,6 +79,6 @@ class Section:
 class DescribeResult:
     """Output of :func:`hermes_chat_recorder.describer.ImageDescriber.describe`."""
 
-    description: str          # freeform AI prose; never gated on
-    text: str                 # OCR'd / literal text visible in image; gated on
+    description: str          # freeform AI prose describing the image
+    text: str                 # OCR'd / literal text visible in the image
     raw: str                  # full raw response, kept for debugging

@@ -1,14 +1,16 @@
-"""hermes-chat-recorder — Hermes plugin that records Matrix chat to a vault.
+"""hermes-chat-recorder — Hermes plugin that records gateway chats to a vault.
 
-See README.md and docs/DESIGN.md for the full architecture. Public surface
-is the :func:`register` function, which Hermes's plugin loader invokes
-when the plugin is discovered (either as a bundled `plugin.yaml` install
-or via the ``hermes_agent.plugins`` entry-point group).
+Records every message the Hermes gateway dispatches — any platform —
+into per-platform, per-chat, per-day Markdown files. See README.md and
+docs/DESIGN.md for the full architecture. Public surface is the
+:func:`register` function, which Hermes's plugin loader invokes when
+the plugin is discovered (either as a directory install or via the
+``hermes_agent.plugins`` entry-point group).
 """
 
 from __future__ import annotations
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = ["register"]
 

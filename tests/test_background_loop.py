@@ -15,7 +15,6 @@ import threading
 import pytest
 
 from hermes_chat_recorder._background_loop import (
-    BackgroundLoop,
     _reset_for_tests,
     get_background_loop,
 )

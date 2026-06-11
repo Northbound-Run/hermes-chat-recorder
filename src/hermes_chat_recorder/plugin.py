@@ -55,7 +55,7 @@ def register(ctx: Any) -> Recorder | None:
     # hook only ships ``session_id``, never the gateway object — so we
     # can't wire there).
     def _wire(gateway: Any) -> None:
-        _wire_matrix_adapter(recorder, gateway=gateway)
+        _wire_adapters(recorder, gateway=gateway)
 
     recorder = Recorder(
         config=config,
@@ -79,10 +79,11 @@ def register(ctx: Any) -> Recorder | None:
     ctx.register_hook("pre_gateway_dispatch", recorder.on_pre_gateway_dispatch)
 
     logger.info(
-        "hermes_chat_recorder: registered (vault_root=%s, bot_type=%s, "
+        "hermes_chat_recorder: registered (vault_root=%s, bot_type=%s, platforms=%s, "
         "room_overrides=%d, user_overrides=%d) — STT and vision delegated to Hermes",
         config.vault_root,
         config.bot_type,
+        sorted(config.platforms) if config.platforms else "all",
         len(config.room_overrides),
         len(config.user_overrides),
     )
@@ -159,37 +160,80 @@ def _read_plugin_block(ctx: Any) -> dict | None:
     return None
 
 
-def _wire_matrix_adapter(recorder: Recorder, **kwargs: Any) -> None:
-    """Locate the live Matrix adapter and wire it up to the recorder.
+def _wire_adapters(recorder: Recorder, **kwargs: Any) -> None:
+    """Wire every live platform adapter up to the recorder.
 
     Called lazily from the recorder on the first
     ``pre_gateway_dispatch`` invocation (which is the earliest hook that
-    actually receives ``gateway=self`` from Hermes). On finding the
-    adapter we:
+    actually receives ``gateway=self`` from Hermes). For EVERY adapter
+    we wrap ``send`` so outbound replies land in the vault. The Matrix
+    adapter additionally gets:
 
-    1. Capture a callable that downloads bytes for an ``mxc://`` URL.
-       Adapter method names differ across mautrix versions — try a few.
-    2. Read the bot's MXID from the adapter's config.
-    3. Wire the resolver's lookups to the live Matrix client.
-    4. Wrap the adapter's ``send`` method so outbound replies land in
-       the vault.
+    1. The bot's MXID read from its config (self-identification).
+    2. A media-download fallback for legacy events without a cached
+       local file.
+    3. Name-resolver lookups bound to the live Matrix client (room
+       names, profile display names, DM peers).
     """
     gateway = kwargs.get("gateway") or kwargs.get("gateway_runner")
     if gateway is None:
         logger.warning(
             "hermes_chat_recorder: wiring callback fired without a gateway; "
-            "outbound recording and media download will be unavailable."
+            "outbound recording will be unavailable."
         )
         return
 
-    adapter = _find_matrix_adapter(gateway)
-    if adapter is None:
+    adapters = _iter_adapters(gateway)
+    if not adapters:
         logger.warning(
-            "hermes_chat_recorder: no live matrix adapter found in gateway.adapters; "
-            "outbound recording and media download will be unavailable."
+            "hermes_chat_recorder: no live adapters found in gateway.adapters; "
+            "outbound recording will be unavailable."
         )
         return
 
+    for platform, adapter in adapters:
+        if platform == "matrix":
+            _wire_matrix_extras(recorder, adapter)
+        _wrap_send(adapter, recorder, platform)
+
+    logger.info(
+        "hermes_chat_recorder: outbound recording wired for %s",
+        ", ".join(sorted(p for p, _ in adapters)),
+    )
+
+
+def _iter_adapters(gateway: Any) -> list[tuple[str, Any]]:
+    """Normalize ``gateway.adapters`` to ``[(platform_value, adapter)]``.
+
+    Hermes's ``GatewayRunner.adapters`` is a ``Dict[Platform,
+    BasePlatformAdapter]`` — keyed by the Platform enum, NOT by string —
+    so keys are normalized via their ``.value``. String-keyed dicts
+    (test fixtures) and list/tuple shapes (defensive, in case the
+    upstream type changes) are accepted too.
+    """
+    adapters = getattr(gateway, "adapters", None)
+    found: list[tuple[str, Any]] = []
+    if isinstance(adapters, dict):
+        for platform_key, adapter in adapters.items():
+            value = getattr(platform_key, "value", None) or str(platform_key)
+            name = str(value).lower()
+            if name and name != "none":
+                found.append((name, adapter))
+        return found
+    if isinstance(adapters, (list, tuple)):
+        for adapter in adapters:
+            platform = getattr(adapter, "platform", None) or getattr(adapter, "name", None)
+            if platform is None:
+                continue
+            value = getattr(platform, "value", None) or str(platform)
+            name = str(value).lower()
+            if name and name != "none":
+                found.append((name, adapter))
+    return found
+
+
+def _wire_matrix_extras(recorder: Recorder, adapter: Any) -> None:
+    """Matrix-only wiring: bot MXID, media-download fallback, name lookups."""
     bot_mxid = _read_bot_mxid(adapter)
     if bot_mxid:
         recorder.set_bot_mxid(bot_mxid)
@@ -200,38 +244,6 @@ def _wire_matrix_adapter(recorder: Recorder, **kwargs: Any) -> None:
         recorder.set_download_media(download)
 
     _wire_name_resolver(recorder, adapter)
-
-    _wrap_send(adapter, recorder)
-
-
-def _find_matrix_adapter(gateway: Any) -> Any | None:
-    """Locate the Matrix adapter on the gateway.
-
-    Hermes's ``GatewayRunner.adapters`` is a ``Dict[Platform, BasePlatformAdapter]``
-    — keyed by the Platform enum, NOT by string. We can't ``.get("matrix")``;
-    we have to iterate, normalize the platform key to its ``.value``
-    (which is the string ``"matrix"``), and match on that. Also accept
-    list/tuple shapes for defensiveness in case the upstream type changes.
-    """
-    adapters = getattr(gateway, "adapters", None)
-    if isinstance(adapters, dict):
-        # String-keyed fallback (test ctx, future API).
-        for key in ("matrix", "Matrix"):
-            if key in adapters:
-                return adapters[key]
-        # Enum-keyed real path.
-        for platform_key, adapter in adapters.items():
-            value = getattr(platform_key, "value", None) or str(platform_key)
-            if str(value).lower() == "matrix":
-                return adapter
-        return None
-    if isinstance(adapters, (list, tuple)):
-        for a in adapters:
-            platform = getattr(a, "platform", None) or getattr(a, "name", None)
-            value = getattr(platform, "value", None) or str(platform)
-            if str(value).lower() == "matrix":
-                return a
-    return None
 
 
 def _read_bot_mxid(adapter: Any) -> str:
@@ -249,22 +261,22 @@ def _read_bot_mxid(adapter: Any) -> str:
 
 
 def _wire_name_resolver(recorder: Recorder, adapter: Any) -> None:
-    """Bind the resolver's lookups to the live Matrix client.
+    """Bind the resolver's Matrix lookups to the live Matrix client.
 
     Falls back gracefully when the client is missing or its method
     surface doesn't match mautrix conventions — the resolver already
-    has filesystem-slug and MXID-localpart fallbacks, so a wiring
-    failure just means we keep using those.
+    has per-event hints plus ID-derived fallbacks, so a wiring failure
+    just means we keep using those.
     """
     # Hermes's MatrixAdapter stores the mautrix client on the private
-    # attribute ``_client`` (see gateway/platforms/matrix.py:346). Try
-    # the public name first for forward-compat in case upstream renames
-    # it, then fall back to the underscore-prefixed real attribute.
+    # attribute ``_client`` (see gateway/platforms/matrix.py). Try the
+    # public name first for forward-compat in case upstream renames it,
+    # then fall back to the underscore-prefixed real attribute.
     client = getattr(adapter, "client", None) or getattr(adapter, "_client", None)
     if client is None:
         logger.info(
             "hermes_chat_recorder: matrix adapter exposes no .client or ._client; "
-            "names will fall back to MXIDs and room-ID slugs."
+            "names will fall back to event hints and ID-derived slugs."
         )
         return
 
@@ -340,7 +352,7 @@ def _wire_name_resolver(recorder: Recorder, adapter: Any) -> None:
             if isinstance(display, str) and display.strip():
                 return display.strip()
             # Last-resort: localpart of the peer's MXID so we still get
-            # SOMETHING readable for the room slug.
+            # SOMETHING readable for the chat slug.
             local = mxid_localpart(str(member_mxid))
             if local:
                 return local
@@ -414,11 +426,10 @@ def _extract_send_args(args: tuple, kwargs: dict) -> tuple[str, str]:
     """Pull ``chat_id`` and the message body out of a ``send`` call.
 
     Hermes's canonical signature is ``send(chat_id, content, reply_to,
-    metadata)`` and the gateway invokes it with keyword arguments
-    (gateway/platforms/base.py:2485). Older Hermes builds used
-    ``text`` instead of ``content``. We accept both kwarg names and
-    fall back to positional args so the wrapper works regardless of
-    how the caller binds the parameters.
+    metadata)`` and the gateway invokes it with keyword arguments.
+    Older Hermes builds used ``text`` instead of ``content``. We accept
+    both kwarg names and fall back to positional args so the wrapper
+    works regardless of how the caller binds the parameters.
 
     Returns ``(chat_id, message_body)``. Either may be empty string
     when the caller passes an unexpected shape; the recorder treats
@@ -444,17 +455,18 @@ def _extract_send_args(args: tuple, kwargs: dict) -> tuple[str, str]:
     return chat_id, text
 
 
-def _wrap_send(adapter: Any, recorder: Recorder) -> None:
+def _wrap_send(adapter: Any, recorder: Recorder, platform: str) -> None:
     """Idempotently replace ``adapter.send`` with a wrapper that
     records outbound replies after a successful send.
 
     Handles three function shapes:
 
     * Pure sync — ``def send(...) -> SendResult``
-    * Pure async — ``async def send(...) -> SendResult``
+    * Pure async — ``async def send(...) -> SendResult`` (every
+      current Hermes adapter)
     * Sync function returning awaitable — ``def send(...) -> Coroutine``
-      (this is the trap Codex caught — ``iscoroutinefunction`` returns
-      False for these, but the result needs awaiting before we record)
+      (``iscoroutinefunction`` returns False for these, but the result
+      needs awaiting before we can read the sent message's ID)
     """
     if getattr(adapter, "_chat_recorder_send_wrapped", False):
         return  # already wrapped
@@ -466,16 +478,15 @@ def _wrap_send(adapter: Any, recorder: Recorder) -> None:
 
     is_coro_fn = inspect.iscoroutinefunction(original_send)
 
-    # NB: don't capture ``recorder.bot_mxid`` here — it's resolved
-    # lazily during adapter wiring AND can be re-set later if the
-    # initial lookup failed. Read it at call time so outbound sections
-    # always get the freshest value.
     if is_coro_fn:
 
         async def wrapped(*args, **kwargs):
             chat_id, text = _extract_send_args(args, kwargs)
             result = await original_send(*args, **kwargs)
-            _record_outbound(recorder, adapter, chat_id, text, result, recorder.bot_mxid)
+            try:
+                _record_outbound(recorder, platform, chat_id, text, result)
+            except Exception as exc:
+                logger.warning("hermes_chat_recorder: outbound recording failed: %s", exc)
             return result
     else:
 
@@ -483,15 +494,18 @@ def _wrap_send(adapter: Any, recorder: Recorder) -> None:
             chat_id, text = _extract_send_args(args, kwargs)
             result = original_send(*args, **kwargs)
             # Some adapter decorators present a sync surface but return
-            # a coroutine. If we record on the coroutine object the
-            # event_id is missing and the recorded "send" might never
-            # actually complete. Bridge via the background loop so we
-            # both record the real result AND propagate any errors.
+            # a coroutine. If we recorded on the coroutine object the
+            # message_id would be missing and the recorded "send" might
+            # never actually complete. Bridge via the background loop
+            # so we both record the real result AND propagate errors.
             if inspect.isawaitable(result):
                 from hermes_chat_recorder._background_loop import get_background_loop
 
                 result = get_background_loop().run_coro_sync(result)
-            _record_outbound(recorder, adapter, chat_id, text, result, recorder.bot_mxid)
+            try:
+                _record_outbound(recorder, platform, chat_id, text, result)
+            except Exception as exc:
+                logger.warning("hermes_chat_recorder: outbound recording failed: %s", exc)
             return result
 
     adapter.send = wrapped  # type: ignore[assignment]
@@ -500,37 +514,62 @@ def _wrap_send(adapter: Any, recorder: Recorder) -> None:
 
 def _record_outbound(
     recorder: Recorder,
-    adapter: Any,
+    platform: str,
     chat_id: str,
     text: str,
     send_result: Any,
-    bot_mxid: str,
 ) -> None:
-    """Pull the event_id out of the adapter's send result and persist."""
+    """Pull the message ID out of the adapter's send result and persist.
+
+    Hermes adapters return a ``SendResult`` with ``success`` and
+    ``message_id`` fields; both are read duck-typed so dict-shaped and
+    legacy results keep working. Failed sends are not recorded — the
+    message never reached the chat.
+
+    The ENTIRE body is exception-guarded: recording must never make a
+    successful ``adapter.send`` look like it failed to the gateway,
+    even if the result object's attribute access itself raises.
+    """
+    try:
+        _record_outbound_inner(recorder, platform, chat_id, text, send_result)
+    except Exception as exc:
+        logger.warning("hermes_chat_recorder: outbound recording failed: %s", exc)
+
+
+def _record_outbound_inner(
+    recorder: Recorder,
+    platform: str,
+    chat_id: str,
+    text: str,
+    send_result: Any,
+) -> None:
+    success = getattr(send_result, "success", None)
+    if success is None and isinstance(send_result, dict):
+        success = send_result.get("success")
+    if success is False:
+        return
+
     event_id = ""
-    for attr in ("event_id", "message_id", "id"):
+    for attr in ("message_id", "event_id", "id"):
         val = getattr(send_result, attr, None)
         if isinstance(val, str) and val:
             event_id = val
             break
-    if not event_id:
-        # Some adapters return dicts.
-        if isinstance(send_result, dict):
-            event_id = (
-                str(send_result.get("event_id") or send_result.get("id") or "")
-            )
+    if not event_id and isinstance(send_result, dict):
+        event_id = str(
+            send_result.get("message_id")
+            or send_result.get("event_id")
+            or send_result.get("id")
+            or ""
+        )
     if not event_id:
         # Fallback so the vault has something stable to anchor against.
         event_id = f"out:{datetime.now(timezone.utc).isoformat()}"
 
-    sender_display = bot_mxid or "bot"
-    try:
-        recorder.record_outbound(
-            room_id=chat_id,
-            sender_display=sender_display,
-            text=text,
-            event_id=event_id,
-            timestamp=datetime.now(timezone.utc),
-        )
-    except Exception as exc:
-        logger.warning("hermes_chat_recorder: record_outbound failed: %s", exc)
+    recorder.record_outbound(
+        platform=platform,
+        chat_id=chat_id,
+        text=text,
+        event_id=event_id,
+        timestamp=datetime.now(timezone.utc),
+    )

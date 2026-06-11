@@ -1,19 +1,11 @@
+# Hermes plugin manifest. Keys follow hermes_cli/plugins.py's
+# PluginManifest parser: name, version, description, author, kind,
+# requires_env, provides_tools, provides_hooks.
 name: chat_recorder
-version: 0.6.0
-description: "Record every Hermes Matrix chat message into a vault (text, voice transcripts, image descriptions). Pretty room/user names. STT and vision delegated to Hermes's built-in tools."
+version: 0.7.0
+description: "Record every Hermes gateway chat message into a Markdown vault — any platform (Matrix, Telegram, Discord, Slack, Signal, WhatsApp, …), with voice transcripts and image descriptions delegated to Hermes's built-in STT and vision tools."
 author: Northbound
-license: MIT
-homepage: https://github.com/northbound-run/hermes-chat-recorder
 kind: standalone
 
-# This plugin no longer reads any env vars of its own. STT credentials
-# (Groq / OpenAI / Mistral / xAI) and vision providers are managed by
-# Hermes via the top-level `stt:` and `auxiliary.vision:` config blocks.
-optional_env:
-  TRANSCRIPT_TZ:
-    description: "Timezone for day-boundary in the markdown vault filenames (default: America/Los_Angeles)."
-
-# Hooks the plugin registers. The Hermes plugin loader inspects this
-# list for the `hermes gateway plugins list` view.
-hooks:
+provides_hooks:
   - pre_gateway_dispatch

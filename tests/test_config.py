@@ -224,7 +224,7 @@ def test_name_overrides_rejects_non_mapping() -> None:
 
 
 def test_name_overrides_rejects_non_mapping_rooms() -> None:
-    with pytest.raises(ConfigError, match="name_overrides.rooms must be a mapping"):
+    with pytest.raises(ConfigError, match=r"name_overrides\.rooms must be a mapping"):
         load_config(
             {"vault_root": "/x", "name_overrides": {"rooms": ["not", "a", "dict"]}},
             env={},
@@ -251,3 +251,50 @@ def test_name_overrides_rejects_non_string_value() -> None:
             },
             env={},
         )
+
+
+# ---------------------------------------------------------------------------
+# platforms allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_platforms_default_empty_means_all() -> None:
+    cfg = load_config({"vault_root": "/x"}, env={})
+    assert cfg.platforms == frozenset()
+
+
+def test_platforms_parsed_and_normalized() -> None:
+    cfg = load_config(
+        {"vault_root": "/x", "platforms": ["Matrix", "  TELEGRAM "]}, env={}
+    )
+    assert cfg.platforms == frozenset({"matrix", "telegram"})
+
+
+def test_platforms_rejects_non_list() -> None:
+    with pytest.raises(ConfigError, match="platforms must be a list"):
+        load_config({"vault_root": "/x", "platforms": "matrix"}, env={})
+
+
+def test_platforms_rejects_blank_entries() -> None:
+    with pytest.raises(ConfigError, match="non-empty strings"):
+        load_config({"vault_root": "/x", "platforms": ["matrix", ""]}, env={})
+
+
+# ---------------------------------------------------------------------------
+# bot_name
+# ---------------------------------------------------------------------------
+
+
+def test_bot_name_defaults_empty() -> None:
+    cfg = load_config({"vault_root": "/x"}, env={})
+    assert cfg.bot_name == ""
+
+
+def test_bot_name_parsed_and_stripped() -> None:
+    cfg = load_config({"vault_root": "/x", "bot_name": "  Recorder Bot  "}, env={})
+    assert cfg.bot_name == "Recorder Bot"
+
+
+def test_bot_name_rejects_non_string() -> None:
+    with pytest.raises(ConfigError, match="bot_name must be a string"):
+        load_config({"vault_root": "/x", "bot_name": 42}, env={})
