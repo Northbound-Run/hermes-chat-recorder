@@ -585,10 +585,28 @@ def test_threaded_reply_is_not_treated_as_edit() -> None:
         ("-1001234567", "1001234567"),     # Telegram group
         ("987654321098765432", "987654321098765432"),  # Discord snowflake
         ("user@example.com", "user-example-com"),       # email
+        # Signal group IDs contain a colon but are NOT host-qualified
+        # Matrix IDs — they must keep their full value, not collapse
+        # to "group".
+        (
+            "group:Wup95ApOtIkZ+9mwAvGe5OW8hp1D/W8NitkwkGZJfpY=",
+            "group-Wup95ApOtIkZ-9mwAvGe5OW8hp1D-W8NitkwkGZJfpY",
+        ),
     ],
 )
 def test_slug_derivation(cid: str, expected: str) -> None:
     assert slug_from_chat_id(cid) == expected
+
+
+def test_signal_group_slug_consistent_between_hint_and_id_fallback() -> None:
+    """The Signal adapter reports chat_name == chat_id for groups, so
+    the hint-based path (inbound) and the ID fallback (hint-less
+    outbound) must produce the SAME folder — otherwise one chat splits
+    across two directories depending on which direction spoke first."""
+    from hermes_chat_recorder.name_resolver import sanitize_slug
+
+    gid = "group:Wup95ApOtIkZ+9mwAvGe5OW8hp1D/W8NitkwkGZJfpY="
+    assert sanitize_slug(gid) == slug_from_chat_id(gid)
 
 
 def test_event_info_is_frozen() -> None:

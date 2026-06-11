@@ -429,16 +429,19 @@ def slug_from_chat_id(chat_id: str) -> str:
     The last-resort fallback when no chat name is available. Matrix
     room IDs (``!abcdef:server`` / ``#name:server``) lose their sigil
     and ``:server`` suffix; other platforms' IDs (Telegram numeric,
-    Discord snowflakes, …) pass through. Anything unsafe for a
-    filename is sanitized to alnum + hyphen.
+    Discord snowflakes, Signal ``group:<base64>``, …) keep their full
+    value — the ``:server`` strip applies ONLY to sigil-prefixed
+    Matrix IDs, because a bare colon is meaningful elsewhere (a Signal
+    group ID split at ``:`` would collapse every group to ``group``).
+    Anything unsafe for a filename is sanitized to alnum + hyphen.
     """
     if not chat_id:
         return "unknown-chat"
     s = chat_id
     if s.startswith(("!", "#")):
         s = s[1:]
-    if ":" in s:
-        s = s.split(":", 1)[0]
+        if ":" in s:
+            s = s.split(":", 1)[0]
     # Replace anything unsafe for a filename.
     safe = []
     for ch in s:

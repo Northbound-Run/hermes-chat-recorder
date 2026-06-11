@@ -5,6 +5,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/)
 (pre-1.0: minor bumps may break).
 
+## [0.7.2] — 2026-06-11
+
+### Fixed
+- **Signal group IDs no longer collapse to `group/`**: the ID-slug
+  fallback split every chat ID at the first colon (a Matrix-ism), so a
+  hint-less write for a Signal group (`group:<base64>`) landed in a
+  shared `group/` folder. The `:server` strip now applies only to
+  sigil-prefixed Matrix IDs, and the hint and fallback paths produce
+  the same folder for Signal groups.
+
 ## [0.7.1] — 2026-06-11
 
 ### Fixed

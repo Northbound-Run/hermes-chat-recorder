@@ -1,8 +1,8 @@
 # Hermes plugin manifest. Keys follow hermes_cli/plugins.py's
-# PluginManifest parser: name, version, description, author, kind,
+# PluginManifest parser: name,  0.7.1:version: 0.7.2, description, author, kind,
 # requires_env, provides_tools, provides_hooks.
 name: chat_recorder
-version: 0.7.1
+ 0.7.1:version: 0.7.2: 0.7.1
 description: "Record every Hermes gateway chat message into a Markdown vault — any platform (Matrix, Telegram, Discord, Slack, Signal, WhatsApp, …), with voice transcripts and image descriptions delegated to Hermes's built-in STT and vision tools."
 author: Northbound
 kind: standalone
