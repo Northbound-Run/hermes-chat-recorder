@@ -170,6 +170,39 @@ mkdir -p <vault_root>/matrix && mv <vault_root>/<each-room-folder> <vault_root>/
 
 (`bot_type: "1on1"` flat layouts are unaffected.)
 
+## Compatibility notes & gotchas
+
+**Adapter-level mention gating hides messages from the recorder.**
+Some Hermes adapters can drop unmentioned group messages *inside the
+adapter*, before any plugin hook runs — e.g. Signal's
+`require_mention` / `SIGNAL_REQUIRE_MENTION`. With that enabled, gated
+messages are never dispatched and therefore never recorded. If you
+want "archive everything, reply only when mentioned", leave
+adapter-level gating off and gate the *wake* instead: a small
+companion plugin that returns `{"action": "skip"}` from
+`pre_gateway_dispatch` for unmentioned group messages. Hermes runs all
+hook callbacks before acting on any result, so the recorder archives
+the message either way. (Caveat for entry-point distribution: the
+gateway honors the first `skip` and stops at a `rewrite`, so a gate
+plugin should load before this one — install it as a user-dir plugin
+under `~/.hermes/plugins/`, which always loads ahead of pip
+entry-points.)
+
+**Plugin load timing on older Hermes.** Current Hermes calls
+`discover_plugins()` at gateway startup, so recording begins with the
+first message. Older versions loaded entry-point plugins lazily on the
+first agent turn — messages before that were invisible to the hook. On
+such versions, add a `gateway:startup` hook that calls
+`hermes_cli.plugins.discover_plugins()` (see Hermes's gateway event
+hooks docs) to load plugins at boot.
+
+**Outbound capture starts at the first inbound dispatch.** The `send`
+wrappers are wired lazily when the first message flows through the
+gateway, so bot messages sent before that moment in a fresh process
+(e.g. startup broadcasts) may be missed or, when no chat name is known
+yet, filed under an ID-derived folder name until a message in that
+chat establishes the pretty name.
+
 ## Troubleshooting
 
 Plugin not showing up? Hermes has verbose discovery logs:
