@@ -1,21 +1,101 @@
-# hermes-chat-recorder
+# hermes-chat-recorder — Hermes Plugin
 
 [![PyPI](https://img.shields.io/pypi/v/hermes-chat-recorder)](https://pypi.org/project/hermes-chat-recorder/)
 [![CI](https://github.com/northbound-run/hermes-chat-recorder/actions/workflows/ci.yml/badge.svg)](https://github.com/northbound-run/hermes-chat-recorder/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/pypi/pyversions/hermes-chat-recorder)](https://pypi.org/project/hermes-chat-recorder/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A [Hermes Agent](https://hermes-agent.nousresearch.com) plugin that
-records every chat message the gateway sees — on **any connected
-platform** (Matrix, Telegram, Discord, Slack, Signal, WhatsApp, IRC,
-email, …) — into an Obsidian-style Markdown vault. Voice notes are
-transcribed and images are described inline, using whatever STT and
-vision providers Hermes is already configured for.
+**Record every chat message the Hermes gateway sees — on any connected platform (Matrix, Telegram, Discord, Slack, Signal, WhatsApp, IRC, email, …) — into an Obsidian-style Markdown vault.** Voice notes are transcribed and images are described inline using whatever STT and vision providers Hermes is already configured for. No databases, no sidecar indexes, no third-party API keys.
+
+`hermes-chat-recorder` adds one thing to Hermes: a single `pre_gateway_dispatch` hook that archives traffic to a greppable vault. It is **recording-only** — it never decides whether the agent wakes up.
 
 > **Status: alpha (pre-1.0).** APIs and config schema may change.
 > Used in production at Northbound.
 
-## What it does
+---
+
+## Why this exists
+
+Most chat-archival setups fail in one of two boring ways: they bolt onto a single platform, or they drag in their own transcription/vision stack with its own keys to rotate. This plugin is delegation-based instead:
+
+- **Any platform, one hook.** Every Hermes adapter normalizes to a unified `MessageEvent`, so the same recorder captures Matrix, Telegram, Discord, Slack, Signal, WhatsApp, IRC, and email without per-platform code.
+- **No third-party deps.** STT and vision are delegated to Hermes's built-in tools — local faster-whisper, Groq, OpenAI, Mistral, or xAI for speech; the main LLM or an auxiliary vision provider for images. The only runtime requirement is Hermes itself.
+- **Recording-only.** It does NOT gate the agent's wake — use Hermes's native mention/allowlist settings for that. It records *before* Hermes's auth/pairing checks, so messages from unpaired senders land in the vault too. **Treat the vault path as sensitive.**
+- **Pretty names for free.** Folders come out as `telegram/Family-Chat/` and headers as `### 09:14 Annika · voice (0:12)`, resolved from adapter metadata (and, on Matrix, live room/profile lookups).
+- **Greppable, not a database.** Per-platform, per-chat, per-day Markdown files with HTML-comment anchors for idempotency. Obsidian-friendly, diff-friendly, no migrations.
+
+---
+
+## Quick Start
+
+```bash
+# 1) Install + enable the plugin (pick ONE path)
+
+#    A. Hermes plugin manager — git-clones into ~/.hermes/plugins/chat_recorder
+hermes plugins install Northbound-Run/hermes-chat-recorder --enable
+
+#    B. PyPI — auto-discovered via the hermes_agent.plugins entry point
+pip install hermes-chat-recorder
+hermes plugins enable chat_recorder
+```
+
+```yaml
+# 2) Configure: add a chat_recorder block to your Hermes config.yaml.
+#    The only setting you really want is vault_root (defaults to
+#    /data/vault/transcripts if omitted).
+plugins:
+  enabled:
+    - chat_recorder           # `--enable` / `enable` already added this
+  chat_recorder:
+    enabled: true
+    vault_root: /data/vault/transcripts
+    record_outbound: true
+    timezone: America/Los_Angeles
+```
+
+```bash
+# 3) Restart the gateway so the plugin loads and wires the adapters.
+#    (Recording begins with the first message after startup.)
+
+# 4) Verify it registered
+hermes plugins list            # chat_recorder should be listed + enabled
+```
+
+Notes:
+
+- **Path A** clones this repo into `~/.hermes/plugins/chat_recorder/` (the directory name comes from the manifest `name:`, which is why `--enable` adds `chat_recorder`). Without `--enable` the installer prompts *"Enable now? [y/N]"*.
+- **Path B** installs from PyPI; Hermes discovers it through the `hermes_agent.plugins` entry-point group. Use this when the plugin lives in the same venv as Hermes.
+- Don't run both paths at once. If a directory clone and the PyPI package are both present they collide on the `chat_recorder` key, and Hermes loads the **entry-point (PyPI) copy** — entry-points are merged last, so they win the collision and the clone is silently ignored. Pick the one that matches how you deploy Hermes.
+- **The vault holds unredacted message content** (including from unpaired senders, recorded before auth). Put `vault_root` somewhere access-controlled.
+- Python 3.10+ is required. The plugin pulls in **no** third-party runtime dependencies.
+
+---
+
+## Updating
+
+```bash
+# Path A (plugin manager)
+hermes plugins update chat_recorder
+
+# Path B (PyPI)
+pip install -U hermes-chat-recorder
+```
+
+Restart the gateway afterward so the updated plugin code is reloaded. See [Upgrading from ≤ 0.6.x](#upgrading-from--06x) if you are crossing the v0.7.0 vault-layout change.
+
+---
+
+## Documentation
+
+- [`docs/DESIGN.md`](docs/DESIGN.md) — full architecture: event normalization, the recorder pipeline, adapter wiring, name resolution, and failure policy.
+- [`CHANGELOG.md`](CHANGELOG.md) — version history (Keep a Changelog format; pre-1.0 minor bumps may break).
+- [Vault format](#vault-format) — the on-disk Markdown layout and idempotency model.
+- [Compatibility notes & gotchas](#compatibility-notes--gotchas) — adapter mention-gating, plugin load timing, and outbound-capture caveats.
+- [Hermes plugin guide](https://hermes-agent.nousresearch.com/docs/guides/build-a-hermes-plugin) — upstream reference for plugin discovery and debugging.
+
+---
+
+## What gets recorded
 
 | Inbound | Behaviour |
 |---|---|
@@ -26,55 +106,11 @@ vision providers Hermes is already configured for.
 | Reaction | Ignored (not recorded as a message section). |
 | Outbound (the agent's own replies, every platform) | Recorded with a `reply_to:` link back to the trigger when available. |
 
-This plugin is **recording-only**. It does NOT decide whether the
-agent wakes up — use Hermes's native mention/allowlist settings for
-that. It also records *before* Hermes's auth/pairing checks, so
-messages from unpaired senders land in the vault too; treat the vault
-path as sensitive.
+---
 
-**Pretty names for free.** Every Hermes adapter ships the chat title
-and sender display name on the unified event (`source.chat_name` /
-`source.user_name`), so folders come out as `telegram/Family-Chat/`
-and headers as `### 09:14 Annika · voice (0:12)`. On Matrix the plugin
-additionally queries the live client (`m.room.name`, profile display
-names, DM peers) for rooms the event metadata doesn't cover. Unnamed
-DMs use the peer's name. All resolutions are cached for the process
-lifetime — restart the gateway to pick up renames.
+## Configuration
 
-**No third-party deps.** STT and vision are delegated to Hermes's
-built-in tools, so whatever provider Hermes is configured for — local
-faster-whisper, Groq, OpenAI, Mistral, xAI for STT; the main LLM or an
-auxiliary vision provider for images — is what the recorder uses. The
-only runtime requirement is Hermes itself.
-
-## Install
-
-```bash
-pip install hermes-chat-recorder
-```
-
-Hermes auto-discovers pip-installed plugins via the
-`hermes_agent.plugins` entry-point group. Then enable it:
-
-```bash
-hermes plugins enable chat_recorder
-```
-
-(or add it to `plugins.enabled` in `config.yaml` by hand, as below).
-Restart the gateway and you should see `chat_recorder` in
-`hermes plugins list`.
-
-For development against an unreleased version:
-
-```bash
-git clone https://github.com/northbound-run/hermes-chat-recorder
-cd hermes-chat-recorder
-pip install -e .[dev]
-```
-
-## Configure
-
-Add to your Hermes `config.yaml`:
+The plugin reads the `plugins.chat_recorder` block in your Hermes `config.yaml`:
 
 ```yaml
 plugins:
@@ -128,6 +164,8 @@ Optional env vars:
 
 - `TRANSCRIPT_TZ` — overrides `timezone`.
 
+---
+
 ## Vault format
 
 Per-platform, per-chat, per-day files at
@@ -159,6 +197,8 @@ same event ID finds the existing section and either updates its stage
 in-place or no-ops if already at a terminal stage. The vault stays
 greppable and Obsidian-friendly: no databases, no sidecar indexes.
 
+---
+
 ## Upgrading from ≤ 0.6.x
 
 v0.7.0 added the platform folder level. Existing Matrix-only vaults
@@ -169,6 +209,8 @@ mkdir -p <vault_root>/matrix && mv <vault_root>/<each-room-folder> <vault_root>/
 ```
 
 (`bot_type: "1on1"` flat layouts are unaffected.)
+
+---
 
 ## Compatibility notes & gotchas
 
@@ -203,6 +245,8 @@ gateway, so bot messages sent before that moment in a fresh process
 yet, filed under an ID-derived folder name until a message in that
 chat establishes the pretty name.
 
+---
+
 ## Troubleshooting
 
 Plugin not showing up? Hermes has verbose discovery logs:
@@ -215,6 +259,64 @@ Common causes: the plugin isn't in `plugins.enabled`, or the gateway
 wasn't restarted after install. See the
 [Hermes plugin guide](https://hermes-agent.nousresearch.com/docs/guides/build-a-hermes-plugin#debugging-plugin-discovery)
 for the full debugging walkthrough.
+
+---
+
+## Local development
+
+```bash
+git clone https://github.com/Northbound-Run/hermes-chat-recorder
+cd hermes-chat-recorder
+pip install -e .[dev]
+
+pytest -q          # 300+ unit tests, no network
+ruff check .
+mypy src
+```
+
+The test suite runs entirely offline. `pytest` uses
+`--import-mode=importlib` (set in `pyproject.toml`) so the repo-root
+`__init__.py` — the directory-install entry shim — doesn't interfere
+with test collection.
+
+---
+
+## Project layout
+
+```text
+.
+├── plugin.yaml             Manifest read by the `hermes plugins install` git-clone path
+├── __init__.py             Repo-root entry shim: puts src/ on sys.path, re-exports register()
+├── pyproject.toml          Package metadata, hermes_agent.plugins entry point, tooling
+├── README.md
+├── CHANGELOG.md
+├── LICENSE
+├── docs/
+│   └── DESIGN.md           Full architecture & design rationale
+├── src/
+│   └── hermes_chat_recorder/
+│       ├── __init__.py     Public surface — register()
+│       ├── plugin.py       register(ctx): config load + hook/adapter wiring
+│       ├── recorder.py     Per-event orchestration (placeholder → finalize)
+│       ├── writer.py       Vault file writer: sections, anchors, idempotency
+│       ├── events.py       MessageEvent → typed EventInfo normalization
+│       ├── transcriber.py  Voice notes → Hermes STT
+│       ├── describer.py    Images → Hermes vision
+│       ├── name_resolver.py Chat/user pretty-name resolution + cache
+│       ├── config.py       Config block parsing & validation
+│       ├── types.py        Shared dataclasses / enums
+│       ├── _background_loop.py  Async helper for off-thread work
+│       └── plugin.yaml     Manifest (wheel copy; informational on the pip path)
+└── tests/                  pytest suite
+```
+
+Two manifests are intentional: the **repo-root** `plugin.yaml` is what
+the git-clone installer reads, while the **packaged** copy under
+`src/` ships in the wheel for reference (the pip/entry-point path
+builds its manifest from the entry-point name and doesn't parse it).
+Keep them in sync.
+
+---
 
 ## Architecture in one paragraph
 
@@ -230,6 +332,13 @@ Failure policy: per-event errors degrade to `*_failed` sections;
 startup/config errors fail registration loudly. See
 [`docs/DESIGN.md`](docs/DESIGN.md) for the full design.
 
+---
+
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 Northbound.
+
+## Related
+
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) — the agent runtime this plugin extends ([docs](https://hermes-agent.nousresearch.com)).
+- [hermes-chat-recorder on PyPI](https://pypi.org/project/hermes-chat-recorder/) — the published package for the pip install path.

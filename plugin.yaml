@@ -1,0 +1,25 @@
+# Hermes plugin manifest — repo root.
+#
+# This is the manifest the `hermes plugins install <owner>/<repo>` git-clone
+# path reads. The installer clones this repo into ~/.hermes/plugins/<name>/
+# (where <name> is the `name:` field below) and the directory loader then
+# imports the sibling __init__.py and calls its register(ctx).
+#
+# Keys follow hermes_cli/plugins.py's PluginManifest parser: name, version,
+# description, author, kind, requires_env, provides_tools, provides_hooks.
+# (license / homepage / optional_env are silently ignored by the parser.)
+#
+# Keep in sync with src/hermes_chat_recorder/plugin.yaml.
+name: chat_recorder
+version: "0.7.3"
+description: "Record every Hermes gateway chat message into a Markdown vault — any platform (Matrix, Telegram, Discord, Slack, Signal, WhatsApp, …), with voice transcripts and image descriptions delegated to Hermes's built-in STT and vision tools."
+author: Northbound
+kind: standalone
+
+# No required env vars: STT/vision are delegated to Hermes's built-in tools,
+# and all behaviour is driven by the `chat_recorder` block in config.yaml.
+# (TRANSCRIPT_TZ is an optional override, documented in the README — not
+# listed here so the installer does not prompt for it.)
+
+provides_hooks:
+  - pre_gateway_dispatch

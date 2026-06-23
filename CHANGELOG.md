@@ -5,6 +5,36 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/)
 (pre-1.0: minor bumps may break).
 
+## [0.7.3] — 2026-06-23
+
+### Added
+- **One-line install via the Hermes plugin manager.** `hermes plugins
+  install Northbound-Run/hermes-chat-recorder --enable` now works
+  alongside the existing `pip install hermes-chat-recorder` path. A
+  repo-root `plugin.yaml` (the manifest the git-clone installer reads)
+  plus a thin repo-root `__init__.py` shim — which puts `src/` on
+  `sys.path` and re-exports `register()` — let Hermes's directory
+  loader find a working entry point at the clone root without
+  abandoning the src-layout PyPI package. If both installs are present
+  they collide on the `chat_recorder` key and the entry-point copy
+  wins, so pick one path.
+- README restructured around Quick Start / Updating / Documentation /
+  Project layout, mirroring the conventions of other Hermes plugins.
+
+### Fixed
+- **Corrupted `plugin.yaml` manifest.** A stray global replace of the
+  token `version` had mangled the manifest into invalid YAML
+  (`version: 0.7.2` had become ` 0.7.1:version: 0.7.2: 0.7.1`);
+  rewritten clean.
+
+### Changed
+- Dev tooling: `pytest` now runs in `--import-mode=importlib` and mypy
+  gains `explicit_package_bases` / `mypy_path = src`. Both are required
+  so the new repo-root `__init__.py` (the directory-install entry shim)
+  doesn't break test collection or type checking — the repo directory
+  name contains a hyphen, which the default `__init__.py` walk-up
+  rejects as an invalid package name.
+
 ## [0.7.2] — 2026-06-11
 
 ### Fixed

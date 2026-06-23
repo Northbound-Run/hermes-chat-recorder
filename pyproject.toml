@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-chat-recorder"
-version = "0.7.2"
+version = "0.7.3"
 description = "Hermes Agent plugin that records every gateway chat message — any platform — to an Obsidian-style Markdown vault, with voice transcripts and image descriptions."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -85,6 +85,22 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM", "RUF"]
 
+[tool.mypy]
+# Pin the package base to src/ so the type checker resolves the package as
+# `hermes_chat_recorder`. Without this, the repo-root __init__.py (the
+# directory-install entry shim) makes mypy walk up to the hyphenated repo
+# directory and reject it as an invalid package name. `mypy src` and bare
+# `mypy` both work with this config.
+files = ["src"]
+mypy_path = "src"
+explicit_package_bases = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# importlib mode imports each test module by path without walking __init__.py
+# chains. Required because the repo now ships a root __init__.py (the
+# directory-install entry shim) and the repo dir name contains a hyphen —
+# prepend mode would try to import the suite as `hermes-chat-recorder.tests`
+# and fail. See README "Project layout".
+addopts = "--import-mode=importlib"

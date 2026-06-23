@@ -24,7 +24,7 @@ from pathlib import Path
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover - py<3.9 fallback, but pyproject requires 3.10+
-    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef,import-not-found]
 
 from hermes_chat_recorder.types import (
     TERMINAL_STAGES,
