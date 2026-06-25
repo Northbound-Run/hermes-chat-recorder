@@ -1,0 +1,75 @@
+# Releasing
+
+How to publish a release to PyPI. Publishing uses GitHub Actions
+[Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC) — no API
+token is ever stored in the repo. The workflow is
+[`.github/workflows/publish.yml`](../.github/workflows/publish.yml).
+
+## One-time setup (before the first publish)
+
+Do this once. It needs the PyPI account that will own the project.
+
+1. **PyPI pending publisher** — on [pypi.org](https://pypi.org) → your account →
+   *Publishing* → *Add a pending publisher*:
+   - PyPI Project Name: `hermes-chat-recorder`
+   - Owner: `Northbound-Run`
+   - Repository: `hermes-chat-recorder`
+   - Workflow: `publish.yml`
+   - Environment: `pypi`
+2. **TestPyPI pending publisher** — repeat the same on
+   [test.pypi.org](https://test.pypi.org) with environment `testpypi`.
+3. **GitHub environments** — repo → Settings → Environments → create `pypi` and
+   `testpypi`. Optionally add yourself as a required reviewer on `pypi` so every
+   production publish needs a manual click.
+
+(The package is already published on PyPI, so the pending publishers above are
+already regular trusted publishers — this section is for reference / TestPyPI.)
+
+## Dry run on TestPyPI (recommended)
+
+1. GitHub → Actions → **Release** → *Run workflow* → target = `testpypi`.
+2. When it's green, confirm the artifact installs from TestPyPI:
+   ```sh
+   pip install --index-url https://test.pypi.org/simple/ \
+     --extra-index-url https://pypi.org/simple/ hermes-chat-recorder
+   ```
+   (The extra index lets dependencies resolve from real PyPI.)
+
+## Cut a release
+
+1. Make sure `main` is green (CI: lint + tests on 3.11–3.14, plus the wheel
+   manifest assertion) and the build is clean locally:
+   ```sh
+   python -m build && twine check --strict dist/*
+   ```
+2. Set the version in **two places that must agree**: `project.version` in
+   `pyproject.toml` and `__version__` in `src/hermes_chat_recorder/__init__.py`.
+   The release workflow **fails if the git tag doesn't match
+   `project.version`**, so the tag and pyproject must agree too.
+3. In `CHANGELOG.md`, move items out of `## [Unreleased]` into a dated
+   `## [X.Y.Z] — YYYY-MM-DD` section.
+4. Commit, then tag and push the tag:
+   ```sh
+   git commit -am "release: vX.Y.Z"
+   git tag vX.Y.Z
+   git push origin main vX.Y.Z
+   ```
+   Pushing the tag triggers the build → publish-to-PyPI job. (If you put a
+   reviewer on the `pypi` environment, approve the run in the Actions tab.)
+5. Confirm it's live:
+   ```sh
+   pip install "hermes-chat-recorder==X.Y.Z"
+   ```
+6. Cut a **GitHub Release** for the tag with the changelog section as the notes:
+   ```sh
+   gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <(sed -n '/## \[X.Y.Z\]/,/## \[/p' CHANGELOG.md)
+   ```
+   or create it from the Releases UI and paste the changelog section.
+
+## After publishing
+
+- The pending publishers from setup become regular trusted publishers
+  automatically after the first successful upload.
+- Restart any Hermes deployment so the updated plugin is reloaded (pip path:
+  `pip install -U hermes-chat-recorder`; directory path:
+  `hermes plugins update chat_recorder`).

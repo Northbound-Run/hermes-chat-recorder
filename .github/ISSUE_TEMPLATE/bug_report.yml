@@ -1,0 +1,53 @@
+name: Bug report
+description: Something isn't working as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For security issues, **don't use this form** — see
+        [SECURITY.md](https://github.com/Northbound-Run/hermes-chat-recorder/blob/main/SECURITY.md).
+        Never paste vault contents, message bodies, or sender identifiers.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      placeholder: "0.7.3  (pip show hermes-chat-recorder)"
+    validations:
+      required: true
+  - type: input
+    id: install-path
+    attributes:
+      label: Install path
+      placeholder: "PyPI (pip) or directory clone (hermes plugins install)"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python / Hermes / OS
+      placeholder: "Python 3.13, Hermes <ver>, Ubuntu 24.04 (in container)"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact vault contents, message bodies, and sender identifiers.
+      render: shell

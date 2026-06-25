@@ -10,7 +10,7 @@ is intentionally thin so it's easy to audit.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from hermes_chat_recorder.config import ConfigError, load_config
@@ -564,12 +564,12 @@ def _record_outbound_inner(
         )
     if not event_id:
         # Fallback so the vault has something stable to anchor against.
-        event_id = f"out:{datetime.now(timezone.utc).isoformat()}"
+        event_id = f"out:{datetime.now(UTC).isoformat()}"
 
     recorder.record_outbound(
         platform=platform,
         chat_id=chat_id,
         text=text,
         event_id=event_id,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )

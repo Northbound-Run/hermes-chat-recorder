@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from hermes_chat_recorder.types import MessageKind
@@ -146,7 +146,7 @@ def _extract_timestamp(event: Any, raw_message: Any, platform: str) -> datetime:
     if platform == "matrix":
         ts_ms = _get(raw_message, "origin_server_ts", "originServerTs", "timestamp_ms")
         if isinstance(ts_ms, (int, float)):
-            return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+            return datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC)
 
     ts = _get(event, "timestamp")
     if isinstance(ts, datetime):
@@ -155,7 +155,7 @@ def _extract_timestamp(event: Any, raw_message: Any, platform: str) -> datetime:
         # as the recorder runs in the same process — and therefore the
         # same system zone — as the adapter that stamped the event.
         return ts.astimezone() if ts.tzinfo is None else ts
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _extract_local_media_path(event: Any, kind: MessageKind) -> str | None:

@@ -1,14 +1,17 @@
 [build-system]
-requires = ["setuptools>=68"]
+# setuptools>=77 for PEP 639 license metadata (`license = "MIT"` SPDX expression
+# + `license-files`); emits Metadata-Version 2.4. Build isolation fetches it.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-chat-recorder"
-version = "0.7.3"
+version = "0.7.4"
 description = "Hermes Agent plugin that records every gateway chat message — any platform — to an Obsidian-style Markdown vault, with voice transcripts and image descriptions."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Northbound", email = "matthall28@gmail.com" },
 ]
@@ -27,11 +30,9 @@ keywords = [
     "ai-agent",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -57,9 +58,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/northbound-run/hermes-chat-recorder"
-Issues = "https://github.com/northbound-run/hermes-chat-recorder/issues"
-Repository = "https://github.com/northbound-run/hermes-chat-recorder"
+Homepage = "https://github.com/Northbound-Run/hermes-chat-recorder"
+Issues = "https://github.com/Northbound-Run/hermes-chat-recorder/issues"
+Repository = "https://github.com/Northbound-Run/hermes-chat-recorder"
+Documentation = "https://github.com/Northbound-Run/hermes-chat-recorder/tree/main/docs"
 
 # Hermes plugin discovery — `pip install hermes-chat-recorder` into a
 # Hermes venv makes the plugin auto-loadable via the `hermes_agent.plugins`
@@ -80,12 +82,13 @@ hermes_chat_recorder = ["plugin.yaml", "py.typed"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
+python_version = "3.11"
 # Pin the package base to src/ so the type checker resolves the package as
 # `hermes_chat_recorder`. Without this, the repo-root __init__.py (the
 # directory-install entry shim) makes mypy walk up to the hyphenated repo

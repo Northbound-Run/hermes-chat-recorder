@@ -5,6 +5,36 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/)
 (pre-1.0: minor bumps may break).
 
+## [Unreleased]
+
+## [0.7.4] - 2026-06-24
+
+### Added
+- Community-health files: `CONTRIBUTING.md`, `SECURITY.md` (private vulnerability
+  reporting via GitHub Security advisories), `.github/ISSUE_TEMPLATE/` (bug +
+  feature + routing `config.yml`), and `.github/PULL_REQUEST_TEMPLATE.md`.
+- `docs/releasing.md` documenting the release process.
+- `HERMES_PLUGIN_STANDARD.md` — the shared conventions Northbound's Hermes
+  plugins follow (a canonical doc kept identical across plugin repos), linked
+  from the README.
+
+### Changed
+- **Python floor raised to 3.11** (`requires-python = ">=3.11"`). The CI matrix
+  is now 3.11–3.14 (dropped 3.10), and the 3.10 classifier, ruff
+  `target-version`, and mypy `python_version` were updated to match.
+- **PEP 639 license metadata** in `pyproject.toml`: `license = "MIT"` +
+  `license-files = ["LICENSE"]`, with `[build-system] requires = ["setuptools>=77"]`
+  (emits Metadata-Version 2.4).
+- **Release workflow** switched to the standard tag-push pattern
+  (`.github/workflows/release.yml`, replacing `publish.yml`): triggers on a
+  pushed `vX.Y.Z` tag, asserts the tag matches `project.version`, runs
+  `twine check --strict`, offers a `workflow_dispatch` TestPyPI dry-run, and
+  publishes via OIDC Trusted Publishing using `pypi`/`testpypi` environments.
+- `[project.urls]` casing corrected to the `Northbound-Run` GitHub org and a
+  `Documentation` URL added; the README CI badge link was fixed to match.
+- Development Status classifier bumped to `4 - Beta` (and the README status note
+  softened from "alpha" to "beta") to match "used in production".
+
 ## [0.7.3] — 2026-06-23
 
 ### Added

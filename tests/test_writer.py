@@ -9,7 +9,7 @@ serialization bug).
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -279,7 +279,7 @@ def test_utc_timestamp_converted_to_configured_zone(tmp_path: Path) -> None:
     during DST, but May 26 is PDT = UTC-7, so 07:00 UTC = midnight PT
     on May 26)."""
     w = VaultWriter(vault_root=tmp_path, timezone="America/Los_Angeles")
-    utc_ts = datetime(2026, 5, 26, 7, 0, tzinfo=timezone.utc)  # 00:00 PT, May 26
+    utc_ts = datetime(2026, 5, 26, 7, 0, tzinfo=UTC)  # 00:00 PT, May 26
     w.write_section(_section(ts=utc_ts), path_slug=ROOM)
     assert (tmp_path / ROOM / "2026-05-26.md").exists()
 
@@ -380,7 +380,7 @@ def test_lock_cache_reuses_same_lock_for_same_key(tmp_path: Path) -> None:
 def _flat_section(event_id: str, body: str = "hi") -> Section:
     return Section(
         event_id=event_id,
-        timestamp=datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 26, 14, 30, tzinfo=UTC),
         sender="Matt",
         kind="text",
         stage="received",

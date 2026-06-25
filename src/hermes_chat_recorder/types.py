@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 # Stage names match docs/DESIGN.md §3.
@@ -48,7 +48,7 @@ TERMINAL_STAGES: frozenset[str] = frozenset(
 )
 
 
-class WriteOutcome(str, Enum):
+class WriteOutcome(StrEnum):
     """Result of a single VaultWriter.write_section call."""
 
     APPENDED = "appended"

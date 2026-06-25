@@ -10,7 +10,7 @@ section at the bottom.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -231,7 +231,7 @@ def _signal_event(text: str = "velociraptor", ts_ms: int = 1718136462885) -> Any
         ),
         media_urls=[],
         raw_message={"sender": "2c991545-6e87-49d1-83fd-8d99fc538761", "timestamp_ms": ts_ms},
-        timestamp=datetime(2026, 6, 11, 20, 27, 42, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 6, 11, 20, 27, 42, tzinfo=UTC),
     )
 
 
@@ -247,7 +247,7 @@ def test_missing_message_id_synthesizes_stable_id() -> None:
 
 
 def test_synthesized_id_falls_back_to_event_timestamp() -> None:
-    event = _event(message_id="", timestamp=datetime(2026, 6, 11, 20, 0, 0, tzinfo=timezone.utc))
+    event = _event(message_id="", timestamp=datetime(2026, 6, 11, 20, 0, 0, tzinfo=UTC))
     info = extract(event)
     assert info is not None
     assert info.event_id == f"syn:5551212:{int(info.timestamp.timestamp() * 1000)}"
@@ -270,7 +270,7 @@ def test_naive_event_timestamp_becomes_tz_aware() -> None:
 
 
 def test_aware_event_timestamp_preserved() -> None:
-    ts = datetime(2026, 6, 11, 9, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 6, 11, 9, 30, tzinfo=UTC)
     info = extract(_event(timestamp=ts))
     assert info is not None
     assert info.timestamp == ts
@@ -292,7 +292,7 @@ def test_matrix_prefers_origin_server_ts() -> None:
     )
     info = extract(event)
     assert info is not None
-    assert info.timestamp == datetime.fromtimestamp(1716729240, tz=timezone.utc)
+    assert info.timestamp == datetime.fromtimestamp(1716729240, tz=UTC)
 
 
 # ---------------------------------------------------------------------------

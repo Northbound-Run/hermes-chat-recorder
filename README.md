@@ -1,7 +1,7 @@
 # hermes-chat-recorder — Hermes Plugin
 
 [![PyPI](https://img.shields.io/pypi/v/hermes-chat-recorder)](https://pypi.org/project/hermes-chat-recorder/)
-[![CI](https://github.com/northbound-run/hermes-chat-recorder/actions/workflows/ci.yml/badge.svg)](https://github.com/northbound-run/hermes-chat-recorder/actions/workflows/ci.yml)
+[![CI](https://github.com/Northbound-Run/hermes-chat-recorder/actions/workflows/ci.yml/badge.svg)](https://github.com/Northbound-Run/hermes-chat-recorder/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/pypi/pyversions/hermes-chat-recorder)](https://pypi.org/project/hermes-chat-recorder/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -9,7 +9,7 @@
 
 `hermes-chat-recorder` adds one thing to Hermes: a single `pre_gateway_dispatch` hook that archives traffic to a greppable vault. It is **recording-only** — it never decides whether the agent wakes up.
 
-> **Status: alpha (pre-1.0).** APIs and config schema may change.
+> **Status: beta (pre-1.0).** APIs and config schema may change.
 > Used in production at Northbound.
 
 ---
@@ -67,7 +67,7 @@ Notes:
 - **Path B** installs from PyPI; Hermes discovers it through the `hermes_agent.plugins` entry-point group. Use this when the plugin lives in the same venv as Hermes.
 - Don't run both paths at once. If a directory clone and the PyPI package are both present they collide on the `chat_recorder` key, and Hermes loads the **entry-point (PyPI) copy** — entry-points are merged last, so they win the collision and the clone is silently ignored. Pick the one that matches how you deploy Hermes.
 - **The vault holds unredacted message content** (including from unpaired senders, recorded before auth). Put `vault_root` somewhere access-controlled.
-- Python 3.10+ is required. The plugin pulls in **no** third-party runtime dependencies.
+- Python 3.11+ is required. The plugin pulls in **no** third-party runtime dependencies.
 
 ---
 
@@ -88,7 +88,11 @@ Restart the gateway afterward so the updated plugin code is reloaded. See [Upgra
 ## Documentation
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — full architecture: event normalization, the recorder pipeline, adapter wiring, name resolution, and failure policy.
+- [`docs/releasing.md`](docs/releasing.md) — how to cut a release (tag-push + Trusted Publishing).
 - [`CHANGELOG.md`](CHANGELOG.md) — version history (Keep a Changelog format; pre-1.0 minor bumps may break).
+- [`HERMES_PLUGIN_STANDARD.md`](HERMES_PLUGIN_STANDARD.md) — the shared conventions Northbound's Hermes plugins follow (identity, packaging, security, CI, release).
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, conventions, and the PR checklist.
+- [`SECURITY.md`](SECURITY.md) — security model and how to report a vulnerability privately.
 - [Vault format](#vault-format) — the on-disk Markdown layout and idempotency model.
 - [Compatibility notes & gotchas](#compatibility-notes--gotchas) — adapter mention-gating, plugin load timing, and outbound-capture caveats.
 - [Hermes plugin guide](https://hermes-agent.nousresearch.com/docs/guides/build-a-hermes-plugin) — upstream reference for plugin discovery and debugging.

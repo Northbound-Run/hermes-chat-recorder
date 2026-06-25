@@ -9,7 +9,7 @@ every message is recorded, and the hook returns either None
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -515,7 +515,7 @@ def test_image_describer_failure_falls_back_to_caption(tmp_path: Path) -> None:
 
 def test_record_outbound_writes_reply_section(tmp_path: Path) -> None:
     r = _build_recorder(tmp_path, bot_name="Recorder Bot")
-    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=UTC)
     r.record_outbound(
         platform="matrix",
         chat_id=ROOM,
@@ -536,7 +536,7 @@ def test_record_outbound_writes_reply_section(tmp_path: Path) -> None:
 
 def test_record_outbound_lands_in_platform_folder(tmp_path: Path) -> None:
     r = _build_recorder(tmp_path)
-    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=UTC)
     r.record_outbound(
         platform="telegram", chat_id="-1001", text="ack", event_id="55", timestamp=ts
     )
@@ -545,7 +545,7 @@ def test_record_outbound_lands_in_platform_folder(tmp_path: Path) -> None:
 
 def test_record_outbound_no_op_when_disabled(tmp_path: Path) -> None:
     r = _build_recorder(tmp_path, record_outbound=False)
-    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=UTC)
     r.record_outbound(
         platform="matrix", chat_id=ROOM, text="hi", event_id="$x", timestamp=ts
     )
@@ -554,7 +554,7 @@ def test_record_outbound_no_op_when_disabled(tmp_path: Path) -> None:
 
 def test_record_outbound_respects_platform_allowlist(tmp_path: Path) -> None:
     r = _build_recorder(tmp_path, platforms=frozenset({"matrix"}))
-    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=UTC)
     r.record_outbound(
         platform="telegram", chat_id="-1001", text="ack", event_id="55", timestamp=ts
     )
@@ -658,7 +658,7 @@ def test_outbound_resolves_bot_display_name_via_resolver(tmp_path: Path) -> None
         user_name_lookup=lambda uid: "Recorder Bot" if uid == BOT else None,
     )
     r = _build_recorder(tmp_path, resolver=resolver)
-    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=UTC)
     r.record_outbound(
         platform="matrix",
         chat_id=ROOM,
@@ -680,7 +680,7 @@ def test_outbound_respects_explicit_friendly_sender(tmp_path: Path) -> None:
     """When the caller passes a real display name, honor it (don't
     override with config or resolver)."""
     r = _build_recorder(tmp_path, bot_name="Config Name")
-    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=UTC)
     r.record_outbound(
         platform="matrix",
         chat_id=ROOM,
@@ -697,7 +697,7 @@ def test_outbound_respects_explicit_friendly_sender(tmp_path: Path) -> None:
 def test_outbound_falls_back_to_literal_bot(tmp_path: Path) -> None:
     """No bot_name, no bot_mxid, no resolver hit → sender is "bot"."""
     r = _build_recorder(tmp_path, bot_mxid="")
-    ts = datetime(2026, 5, 26, 14, 30, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 26, 14, 30, tzinfo=UTC)
     r.record_outbound(
         platform="telegram", chat_id="-1", text="hi", event_id="x", timestamp=ts
     )

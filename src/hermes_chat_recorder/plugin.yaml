@@ -7,7 +7,7 @@
 # builds the manifest from the entry-point name, not this file). The root
 # copy is the one the `hermes plugins install` git-clone path actually reads.
 name: chat_recorder
-version: "0.7.3"
+version: "0.7.4"
 description: "Record every Hermes gateway chat message into a Markdown vault — any platform (Matrix, Telegram, Discord, Slack, Signal, WhatsApp, …), with voice transcripts and image descriptions delegated to Hermes's built-in STT and vision tools."
 author: Northbound
 kind: standalone
